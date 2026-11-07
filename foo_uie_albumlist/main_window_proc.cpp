@@ -136,6 +136,16 @@ LRESULT AlbumListWindow::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             // Nocturne：文字有無會影響清除鈕要不要畫
             invalidate_filter_clear_button();
             return TRUE;
+        case IDCANCEL:
+            // Nocturne：焦點在搜尋框時按 Esc：有文字就清除，沒有文字就把焦點還給樹狀清單（對話框處理會把 Esc 轉成 IDCANCEL）
+            if (m_wnd_edit && GetFocus() == m_wnd_edit) {
+                if (filter_has_text())
+                    SetWindowText(m_wnd_edit, L"");
+                else if (m_wnd_tv)
+                    SetFocus(m_wnd_tv);
+                return 0;
+            }
+            break;
         case IDC_FILTER | (EN_SETFOCUS << 16):
         case IDC_FILTER | (EN_KILLFOCUS << 16):
             // Nocturne：焦點進出會影響底下那條紅線

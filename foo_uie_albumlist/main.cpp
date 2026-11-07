@@ -20,6 +20,24 @@ constexpr auto filter_cue_text = L"Search folders…";
 constexpr auto filter_cue_text = L"搜尋資料夾…";
 #endif
 
+// Nocturne：主選單命令「搜尋專輯清單」（可在 Preferences > Keyboard Shortcuts 綁定快速鍵，例如 Ctrl+F）
+constexpr GUID search_album_list_command_guid
+    = {0xc295c1ff, 0x9f73, 0x421c, {0xa5, 0x4b, 0xe6, 0x2a, 0xe9, 0x54, 0xb2, 0xeb}};
+
+// Nocturne：自編版 Columns UI 的「切換播放頁」命令（View/Layout 底下）。展開的播放頁蓋住主畫面時，用它收回
+constexpr GUID nocturne_toggle_now_playing_command_guid
+    = {0x95dae386, 0xd80a, 0x4ef7, {0xb5, 0x48, 0xd3, 0x6d, 0x0e, 0x4c, 0xc1, 0x63}};
+
+#ifdef NOCTURNE_LANG_EN
+constexpr auto search_album_list_command_name = "Search Album list";
+constexpr auto search_album_list_command_description
+    = "Moves the focus to the Album list search box (collapses the now playing page and shows the box if needed).";
+#else
+constexpr auto search_album_list_command_name = "搜尋專輯清單";
+constexpr auto search_album_list_command_description
+    = "把焦點移到 Album list 的搜尋框（必要時先收回播放頁、顯示搜尋框）。";
+#endif
+
 // Nocturne：搜尋框各部分的尺寸，單位是 96 DPI 下的像素，使用時依視窗 DPI 換算
 constexpr int filter_pill_min_height = 30;
 constexpr int filter_pill_vertical_padding = 7; // 輸入框上下各留的空間（字高之外）
@@ -578,6 +596,57 @@ void AlbumListWindow::clear_filter_text()
     // 清空文字會送出 EN_CHANGE，之後走跟手動刪光文字相同的「延遲重新篩選」流程
     SetWindowText(m_wnd_edit, L"");
     SetFocus(m_wnd_edit);
+}
+
+bool AlbumListWindow::s_focus_filter()
+{
+    if (s_instances.get_count() == 0)
+        return false;
+
+    // 展開的播放頁蓋住主畫面時先收回（命令由自編版 Columns UI 提供，沒有就略過；用「已勾選」判斷現在是不是展開）
+    service_ptr_t<mainmenu_commands> toggle_command;
+    uint32_t toggle_index{};
+    if (menu_item_resolver::g_resolve_main_command(
+            nocturne_toggle_now_playing_command_guid, toggle_command, toggle_index)) {
+        pfc::string8 text;
+        uint32_t flags{};
+        if (toggle_command->get_display(toggle_index, text, flags) && (flags & mainmenu_commands::flag_checked))
+            toggle_command->execute(toggle_index, nullptr);
+    }
+
+    // 優先挑畫面上看得到的面板，沒有就挑第一個（再請 Columns UI 把它顯示出來）
+    AlbumListWindow* target{};
+    for (auto&& instance : s_instances) {
+        const auto wnd = instance->get_wnd();
+        if (wnd && IsWindowVisible(wnd) && instance->get_host()->is_visible(wnd)) {
+            target = instance;
+            break;
+        }
+    }
+    if (!target) {
+        for (auto&& instance : s_instances) {
+            if (instance->get_wnd()) {
+                target = instance;
+                break;
+            }
+        }
+    }
+    if (!target)
+        return false;
+
+    const auto wnd = target->get_wnd();
+    if (!target->get_host()->is_visible(wnd))
+        target->get_host()->set_window_visibility(wnd, true);
+
+    if (!target->m_filter)
+        target->toggle_show_filter();
+
+    if (!target->m_wnd_edit)
+        return false;
+
+    SetFocus(target->m_wnd_edit);
+    Edit_SetSel(target->m_wnd_edit, 0, -1);
+    return true;
 }
 
 void AlbumListWindow::paint_filter_strip(HDC dc)
@@ -1141,3 +1210,24 @@ const GUID AlbumListWindow::s_extension_guid
     = {0x606e9cdd, 0x45ee, 0x4c3b, {0x9f, 0xd5, 0x49, 0x38, 0x1c, 0xeb, 0xe8, 0xae}};
 
 ui_extension::window_factory<AlbumListWindow> blah;
+
+namespace {
+
+// Nocturne：放在「檢視」選單底下的命令，主要用途是讓使用者把 Ctrl+F 綁過來
+class SearchAlbumListCommand : public mainmenu_commands {
+public:
+    uint32_t get_command_count() override { return 1; }
+    GUID get_command(uint32_t index) override { return search_album_list_command_guid; }
+    void get_name(uint32_t index, pfc::string_base& out) override { out = search_album_list_command_name; }
+    bool get_description(uint32_t index, pfc::string_base& out) override
+    {
+        out = search_album_list_command_description;
+        return true;
+    }
+    GUID get_parent() override { return mainmenu_groups::view; }
+    void execute(uint32_t index, service_ptr callback) override { AlbumListWindow::s_focus_filter(); }
+};
+
+mainmenu_commands_factory_t<SearchAlbumListCommand> g_search_album_list_command;
+
+} // namespace

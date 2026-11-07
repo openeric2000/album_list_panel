@@ -51,6 +51,10 @@ public:
     static void s_on_view_script_change(const char* p_view_before, const char* p_view);
     static void s_update_all_window_frames();
 
+    // Nocturne：主選單命令「搜尋專輯清單」的實作。找到一個 Album list 面板，必要時先收回展開的播放頁、顯示面板與搜尋框，
+    // 然後把焦點給搜尋框並全選文字。沒有任何 Album list 面板時回傳 false
+    static bool s_focus_filter();
+
     ~AlbumListWindow();
 
     bool is_bydir() const;
