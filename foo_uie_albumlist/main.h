@@ -99,7 +99,11 @@ public:
 
     unsigned get_type() const override { return ui_extension::type_panel; }
 
-    uie::container_window_v3_config get_window_config() override { return {L"{606E9CDD-45EE-4c3b-9FD5-49381CEBE8AE}"}; }
+    // Nocturne：搜尋框那一列由本視窗自己用 Direct2D 一次畫完（背景＋圓角底＋圖示），所以不使用透明背景
+    uie::container_window_v3_config get_window_config() override
+    {
+        return {L"{606E9CDD-45EE-4c3b-9FD5-49381CEBE8AE}", false};
+    }
 
     void on_task_completion(t_uint32 task, t_uint32 code);
     void on_items_added(const pfc::list_base_const_t<metadb_handle_ptr>& p_data) override;
@@ -115,6 +119,27 @@ public:
 
 private:
     static LRESULT WINAPI s_tree_hook_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
+
+    // Nocturne：搜尋框那一列的版面（單位：實體像素，座標相對於本視窗的工作區）
+    struct FilterLayout {
+        RECT strip{};  // 整列（含外距）
+        RECT pill{};   // 圓角底
+        RECT edit{};   // 輸入框
+        RECT icon{};   // 放大鏡
+        RECT clear{};  // 清除鈕的可點範圍
+    };
+    // 圓角底（與輸入框）實際使用的顏色：設定的搜尋框背景色若與樹狀清單背景色幾乎相同，就調亮（深色）或調暗（淺色）一點，
+    // 否則圓角底會融進背景看不出來
+    static COLORREF get_filter_fill_colour(COLORREF configured_fill, COLORREF strip_background);
+    FilterLayout get_filter_layout(int cx, int cy) const;
+    FilterLayout get_filter_layout() const;
+    bool filter_has_text() const;
+    bool is_over_filter_clear_button(POINT pt) const;
+    void invalidate_filter_strip() const;
+    void invalidate_filter_clear_button() const;
+    void paint_filter_strip(HDC dc);
+    void set_filter_clear_hot(bool hot);
+    void clear_filter_text();
 
     LRESULT WINAPI on_tree_hooked_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
     std::optional<LRESULT> on_tree_lbuttondown(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
@@ -146,6 +171,12 @@ private:
 
     HWND m_wnd_tv{nullptr};
     HWND m_wnd_edit{nullptr};
+    // Nocturne：搜尋框清除鈕的狀態與繪圖資源
+    bool m_filter_clear_hot{};
+    bool m_filter_clear_pressed{};
+    bool m_filter_mouse_tracking{};
+    uih::d2d::MainThreadD2D1Factory m_filter_d2d_factory;
+    wil::com_ptr<ID2D1DCRenderTarget> m_filter_render_target;
     std::optional<cui::colours::helper> m_item_colours;
     wil::unique_htheme m_dd_theme;
     wil::unique_htheme m_tree_view_theme;

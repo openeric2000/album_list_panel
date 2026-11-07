@@ -50,13 +50,75 @@ LRESULT AlbumListWindow::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         SetTextColor(dc, colours.get_colour(cui::colours::colour_text));
         SetBkMode(dc, TRANSPARENT);
 
+        // Nocturne：輸入框的底色要跟 paint_filter_strip 畫的圓角底完全一樣
         if (!s_filter_background_brush)
-            s_filter_background_brush.reset(CreateSolidBrush(colours.get_colour(cui::colours::colour_background)));
+            s_filter_background_brush.reset(CreateSolidBrush(
+                get_filter_fill_colour(colours.get_colour(cui::colours::colour_background),
+                    m_item_colours->get_colour(cui::colours::colour_background))));
 
         return reinterpret_cast<LPARAM>(s_filter_background_brush.get());
     }
     case WM_SIZE:
         on_size(LOWORD(lp), HIWORD(lp));
+        break;
+    case WM_PAINT: {
+        // Nocturne：只有搜尋框那一列是本視窗自己畫的，其餘都是子視窗
+        PAINTSTRUCT ps{};
+        const auto dc = BeginPaint(wnd, &ps);
+        paint_filter_strip(dc);
+        EndPaint(wnd, &ps);
+        return 0;
+    }
+    case WM_SETCURSOR:
+        if (reinterpret_cast<HWND>(wp) == wnd && LOWORD(lp) == HTCLIENT) {
+            POINT pt{};
+            GetCursorPos(&pt);
+            ScreenToClient(wnd, &pt);
+            if (is_over_filter_clear_button(pt)) {
+                SetCursor(LoadCursor(nullptr, IDC_HAND));
+                return TRUE;
+            }
+        }
+        break;
+    case WM_MOUSEMOVE: {
+        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        set_filter_clear_hot(is_over_filter_clear_button(pt));
+        if (m_filter_clear_hot && !m_filter_mouse_tracking) {
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, wnd, 0};
+            m_filter_mouse_tracking = TrackMouseEvent(&tme) != FALSE;
+        }
+        break;
+    }
+    case WM_MOUSELEAVE:
+        m_filter_mouse_tracking = false;
+        set_filter_clear_hot(false);
+        break;
+    case WM_LBUTTONDOWN: {
+        // 點在搜尋框那一列：清除鈕→按下（放開時才清除）；其他地方→把焦點給輸入框
+        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (is_over_filter_clear_button(pt)) {
+            m_filter_clear_pressed = true;
+            SetCapture(wnd);
+            return 0;
+        }
+        const auto layout = get_filter_layout();
+        if (m_wnd_edit && PtInRect(&layout.pill, pt)) {
+            SetFocus(m_wnd_edit);
+            return 0;
+        }
+        break;
+    }
+    case WM_LBUTTONUP:
+        if (m_filter_clear_pressed) {
+            m_filter_clear_pressed = false;
+            ReleaseCapture();
+            if (is_over_filter_clear_button({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}))
+                clear_filter_text();
+            return 0;
+        }
+        break;
+    case WM_CAPTURECHANGED:
+        m_filter_clear_pressed = false;
         break;
     case WM_TIMER:
         if (wp == EDIT_TIMER_ID) {
@@ -71,7 +133,14 @@ LRESULT AlbumListWindow::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             if (m_timer)
                 KillTimer(m_wnd_edit, 500);
             m_timer = SetTimer(wnd, EDIT_TIMER_ID, 500, nullptr) != 0;
+            // Nocturne：文字有無會影響清除鈕要不要畫
+            invalidate_filter_clear_button();
             return TRUE;
+        case IDC_FILTER | (EN_SETFOCUS << 16):
+        case IDC_FILTER | (EN_KILLFOCUS << 16):
+            // Nocturne：焦點進出會影響底下那條紅線
+            invalidate_filter_strip();
+            return 0;
         case IDOK:
             if (GetKeyState(VK_SHIFT) & KF_UP)
                 alp::send_nodes_to_playlist(get_cleaned_selection(), false, false);
@@ -122,6 +191,8 @@ LRESULT AlbumListWindow::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 
         m_direct_write_context.reset();
         m_drag_image_creator.reset();
+        m_filter_render_target.reset();
+        m_filter_d2d_factory.reset();
 
         m_dd_theme.reset();
         m_tree_view_theme.reset();

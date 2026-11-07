@@ -8,6 +8,49 @@
 #include "node_utils.h"
 #include "version.h"
 
+namespace {
+
+// Nocturne：主題的重點紅（229,38,43），搜尋框取得焦點時底下那條線用
+constexpr COLORREF nocturne_accent_colour = RGB(229, 38, 43);
+
+// Nocturne：搜尋框的提示字。中文版「搜尋資料夾…」，英文版（編譯時加 NOCTURNE_LANG_EN）「Search folders…」
+#ifdef NOCTURNE_LANG_EN
+constexpr auto filter_cue_text = L"Search folders…";
+#else
+constexpr auto filter_cue_text = L"搜尋資料夾…";
+#endif
+
+// Nocturne：搜尋框各部分的尺寸，單位是 96 DPI 下的像素，使用時依視窗 DPI 換算
+constexpr int filter_pill_min_height = 30;
+constexpr int filter_pill_vertical_padding = 7; // 輸入框上下各留的空間（字高之外）
+constexpr int filter_margin_x = 8;
+constexpr int filter_margin_top = 6;
+constexpr int filter_margin_bottom = 8;
+constexpr int filter_corner_radius = 6;
+constexpr int filter_icon_size = 14;
+constexpr int filter_icon_left_padding = 11;
+constexpr int filter_icon_gap = 8;
+constexpr int filter_clear_width = 26;
+constexpr int filter_clear_right_padding = 4;
+constexpr int filter_underline_thickness = 2;
+constexpr int filter_fill_same_tolerance = 6;     // 各色版差距在這之內就視為「跟背景一樣」
+constexpr double filter_fill_lift_amount = 0.055; // 調亮（深色）／調暗（淺色）的幅度
+
+int scale_for_dpi(int value, unsigned dpi)
+{
+    return MulDiv(value, gsl::narrow<int>(dpi), USER_DEFAULT_SCREEN_DPI);
+}
+
+// 以 amount（0～1）把 from 往 to 混合；用來算「比文字暗一點」的圖示色
+COLORREF blend_colours(COLORREF from, COLORREF to, double amount)
+{
+    const auto mix = [amount](int a, int b) { return static_cast<int>(a + (b - a) * amount + 0.5); };
+    return RGB(mix(GetRValue(from), GetRValue(to)), mix(GetGValue(from), GetGValue(to)),
+        mix(GetBValue(from), GetBValue(to)));
+}
+
+} // namespace
+
 // TODO: node name as field
 
 DECLARE_COMPONENT_VERSION("Album list panel",
@@ -16,6 +59,7 @@ DECLARE_COMPONENT_VERSION("Album list panel",
 
     "allows you to browse through your media library\n\n"
     "based upon albumlist 3.1.0\n"
+    "Nocturne fork: restyled search box (rounded fill, magnifier, clear button, focus underline)\n"
     "compiled: " COMPILATION_DATE "\n"
     "with Columns UI SDK version: " UI_EXTENSION_VERSION
 
@@ -287,6 +331,9 @@ void AlbumListWindow::update_tree_colours()
     TreeView_SetTextColor(m_wnd_tv, m_item_colours->get_colour(cui::colours::colour_text));
     RedrawWindow(m_wnd_tv, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME);
     SetWindowRedraw(m_wnd_tv, TRUE);
+
+    // Nocturne：搜尋框那一列的外側底色取自樹狀清單的背景色
+    invalidate_filter_strip();
 }
 
 void AlbumListWindow::update_tooltip_theme() const
@@ -317,6 +364,8 @@ void AlbumListWindow::update_edit_colours() const
         return;
 
     RedrawWindow(m_wnd_edit, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE);
+    // Nocturne：圓角底的顏色也取自同一組色彩設定
+    invalidate_filter_strip();
 }
 
 void AlbumListWindow::update_item_height()
@@ -351,7 +400,8 @@ void AlbumListWindow::create_filter(bool set_focus)
     if (!m_filter || m_wnd_edit)
         return;
 
-    constexpr auto flags = WS_EX_CLIENTEDGE;
+    // Nocturne：不使用 Windows 的凹陷邊框，外觀由 paint_filter_strip 畫在輸入框後面
+    constexpr auto flags = 0;
     m_wnd_edit = CreateWindowEx(flags, WC_EDIT, pfc::stringcvt::string_wide_from_utf8(m_saved_filter_query),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, get_wnd(), HMENU(IDC_FILTER),
         core_api::get_my_instance(), nullptr);
@@ -364,7 +414,8 @@ void AlbumListWindow::create_filter(bool set_focus)
     uih::set_window_font(m_wnd_edit, s_font.get(), false);
     if (set_focus)
         SetFocus(m_wnd_edit);
-    Edit_SetCueBannerText(m_wnd_edit, L"Search");
+    // Nocturne：取得焦點時也顯示提示字（第三個參數 TRUE），一點進去提示字就消失會像壞掉
+    Edit_SetCueBannerTextFocused(m_wnd_edit, filter_cue_text, TRUE);
 }
 
 void AlbumListWindow::destroy_filter()
@@ -388,14 +439,20 @@ void AlbumListWindow::destroy_filter()
 
 void AlbumListWindow::on_size(unsigned cx, unsigned cy)
 {
-    HDWP dwp = BeginDeferWindowPos(2);
-    const unsigned edit_height = m_wnd_edit ? uGetFontHeight(s_font.get()) + 4 : 0;
-    const unsigned tv_height = edit_height < cy ? cy - edit_height : cy;
+    const auto layout = get_filter_layout(gsl::narrow<int>(cx), gsl::narrow<int>(cy));
+    const auto strip_height = layout.strip.bottom - layout.strip.top;
+    const auto tv_height = gsl::narrow<int>(cy) - strip_height;
 
-    dwp = DeferWindowPos(dwp, m_wnd_tv, nullptr, 0, 0, cx, tv_height, SWP_NOZORDER);
+    HDWP dwp = BeginDeferWindowPos(2);
+    dwp = DeferWindowPos(dwp, m_wnd_tv, nullptr, 0, 0, gsl::narrow<int>(cx), tv_height, SWP_NOZORDER);
     if (m_wnd_edit)
-        dwp = DeferWindowPos(dwp, m_wnd_edit, nullptr, 0, tv_height, cx, edit_height, SWP_NOZORDER);
+        dwp = DeferWindowPos(dwp, m_wnd_edit, nullptr, layout.edit.left, layout.edit.top,
+            layout.edit.right - layout.edit.left, layout.edit.bottom - layout.edit.top, SWP_NOZORDER);
     EndDeferWindowPos(dwp);
+
+    // 視窗沒有 CS_HREDRAW／CS_VREDRAW，改變大小時搜尋框那一列不會自動重畫
+    if (m_wnd_edit && !IsRectEmpty(&layout.strip))
+        InvalidateRect(get_wnd(), &layout.strip, FALSE);
 }
 
 void AlbumListWindow::on_size()
@@ -403,6 +460,233 @@ void AlbumListWindow::on_size()
     RECT rc;
     GetClientRect(get_wnd(), &rc);
     on_size(rc.right, rc.bottom);
+}
+
+// ---- Nocturne：搜尋框（圓角填色底、放大鏡、清除鈕、焦點底線）----
+
+COLORREF AlbumListWindow::get_filter_fill_colour(COLORREF configured_fill, COLORREF strip_background)
+{
+    const auto close = [](int a, int b) { return std::abs(a - b) <= filter_fill_same_tolerance; };
+    const bool same_as_background = close(GetRValue(configured_fill), GetRValue(strip_background))
+        && close(GetGValue(configured_fill), GetGValue(strip_background))
+        && close(GetBValue(configured_fill), GetBValue(strip_background));
+
+    if (!same_as_background)
+        return configured_fill;
+
+    // 簡單的亮度判斷：偏暗的底往白色混合，偏亮的底往黑色混合
+    const auto brightness = (GetRValue(configured_fill) * 299 + GetGValue(configured_fill) * 587
+                                + GetBValue(configured_fill) * 114)
+        / 1000;
+    return blend_colours(configured_fill, brightness < 128 ? RGB(255, 255, 255) : RGB(0, 0, 0),
+        filter_fill_lift_amount);
+}
+
+AlbumListWindow::FilterLayout AlbumListWindow::get_filter_layout(int cx, int cy) const
+{
+    FilterLayout layout{};
+    if (!m_wnd_edit)
+        return layout;
+
+    const auto dpi = uih::dpi::get_dpi_for_window(get_wnd());
+    const auto px = [dpi](int value) { return scale_for_dpi(value, dpi); };
+
+    const int font_height = gsl::narrow<int>(uGetFontHeight(s_font.get()));
+    const int pill_height = std::max(px(filter_pill_min_height), font_height + 2 * px(filter_pill_vertical_padding));
+    const int strip_height = pill_height + px(filter_margin_top) + px(filter_margin_bottom);
+
+    // 視窗太矮放不下就整列不顯示，樹狀清單用滿整個高度
+    if (strip_height >= cy)
+        return layout;
+
+    layout.strip = {0, cy - strip_height, cx, cy};
+
+    layout.pill.left = px(filter_margin_x);
+    layout.pill.right = std::max<int>(layout.pill.left, cx - px(filter_margin_x));
+    layout.pill.top = layout.strip.top + px(filter_margin_top);
+    layout.pill.bottom = layout.pill.top + pill_height;
+
+    const int icon_size = px(filter_icon_size);
+    layout.icon.left = layout.pill.left + px(filter_icon_left_padding);
+    layout.icon.right = layout.icon.left + icon_size;
+    layout.icon.top = layout.pill.top + (pill_height - icon_size) / 2;
+    layout.icon.bottom = layout.icon.top + icon_size;
+
+    // 清除鈕的位置固定保留（沒有文字時只是不畫），輸入框寬度才不會跟著文字有無而變動
+    layout.clear.right = layout.pill.right - px(filter_clear_right_padding);
+    layout.clear.left = std::max<int>(layout.icon.right, layout.clear.right - px(filter_clear_width));
+    layout.clear.top = layout.pill.top;
+    layout.clear.bottom = layout.pill.bottom;
+
+    layout.edit.left = layout.icon.right + px(filter_icon_gap);
+    layout.edit.right = std::max<int>(layout.edit.left, layout.clear.left);
+    layout.edit.top = layout.pill.top + (pill_height - font_height) / 2;
+    layout.edit.bottom = layout.edit.top + font_height;
+
+    return layout;
+}
+
+AlbumListWindow::FilterLayout AlbumListWindow::get_filter_layout() const
+{
+    RECT rc{};
+    GetClientRect(get_wnd(), &rc);
+    return get_filter_layout(rc.right, rc.bottom);
+}
+
+bool AlbumListWindow::filter_has_text() const
+{
+    return m_wnd_edit && GetWindowTextLength(m_wnd_edit) > 0;
+}
+
+bool AlbumListWindow::is_over_filter_clear_button(POINT pt) const
+{
+    if (!filter_has_text())
+        return false;
+
+    const auto layout = get_filter_layout();
+    return PtInRect(&layout.clear, pt) != FALSE;
+}
+
+void AlbumListWindow::invalidate_filter_strip() const
+{
+    const auto layout = get_filter_layout();
+    if (!IsRectEmpty(&layout.strip))
+        InvalidateRect(get_wnd(), &layout.strip, FALSE);
+}
+
+void AlbumListWindow::invalidate_filter_clear_button() const
+{
+    const auto layout = get_filter_layout();
+    if (!IsRectEmpty(&layout.clear))
+        InvalidateRect(get_wnd(), &layout.clear, FALSE);
+}
+
+void AlbumListWindow::set_filter_clear_hot(bool hot)
+{
+    if (m_filter_clear_hot == hot)
+        return;
+
+    m_filter_clear_hot = hot;
+    invalidate_filter_clear_button();
+}
+
+void AlbumListWindow::clear_filter_text()
+{
+    if (!m_wnd_edit)
+        return;
+
+    // 清空文字會送出 EN_CHANGE，之後走跟手動刪光文字相同的「延遲重新篩選」流程
+    SetWindowText(m_wnd_edit, L"");
+    SetFocus(m_wnd_edit);
+}
+
+void AlbumListWindow::paint_filter_strip(HDC dc)
+{
+    if (!m_wnd_edit)
+        return;
+
+    const auto layout = get_filter_layout();
+    if (IsRectEmpty(&layout.strip))
+        return;
+
+    if (!m_filter_d2d_factory)
+        m_filter_d2d_factory = uih::d2d::create_main_thread_factory();
+    const auto& factory = *m_filter_d2d_factory;
+
+    if (!m_filter_render_target) {
+        const auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f,
+            D2D1_RENDER_TARGET_USAGE_NONE, D2D1_FEATURE_LEVEL_DEFAULT);
+        if (FAILED(factory->CreateDCRenderTarget(&properties, m_filter_render_target.put())))
+            return;
+    }
+
+    // 只畫整列的範圍；繪圖座標以這一列左上角為原點
+    RECT strip = layout.strip;
+    if (FAILED(m_filter_render_target->BindDC(dc, &strip)))
+        return;
+
+    const auto to_rect = [&strip](const RECT& rc) {
+        return D2D1::RectF(static_cast<float>(rc.left - strip.left), static_cast<float>(rc.top - strip.top),
+            static_cast<float>(rc.right - strip.left), static_cast<float>(rc.bottom - strip.top));
+    };
+
+    cui::colours::helper filter_colours(album_list_filter_colours_client_id);
+    const auto strip_colour = m_item_colours->get_colour(cui::colours::colour_background);
+    const auto fill_colour
+        = get_filter_fill_colour(filter_colours.get_colour(cui::colours::colour_background), strip_colour);
+    const auto text_colour = filter_colours.get_colour(cui::colours::colour_text);
+    // 圖示用比文字暗一點的顏色，滑過清除鈕時才用文字色
+    const auto dim_colour = blend_colours(text_colour, fill_colour, 0.45);
+
+    const auto dpi = uih::dpi::get_dpi_for_window(get_wnd());
+    const auto px = [dpi](int value) { return static_cast<float>(scale_for_dpi(value, dpi)); };
+
+    const auto& rt = m_filter_render_target;
+    rt->BeginDraw();
+    rt->Clear(uih::d2d::colorref_to_d2d_color(strip_colour));
+
+    wil::com_ptr<ID2D1SolidColorBrush> brush;
+    if (SUCCEEDED(rt->CreateSolidColorBrush(uih::d2d::colorref_to_d2d_color(fill_colour), brush.put()))) {
+        const auto pill_rect = to_rect(layout.pill);
+        const auto pill = D2D1::RoundedRect(pill_rect, px(filter_corner_radius), px(filter_corner_radius));
+        rt->FillRoundedRectangle(pill, brush.get());
+
+        // 取得焦點：圓角底最下面一條重點紅底線（用圓角底當遮罩，兩端會跟著圓角收掉）
+        if (GetFocus() == m_wnd_edit) {
+            wil::com_ptr<ID2D1RoundedRectangleGeometry> geometry;
+            if (SUCCEEDED(factory->CreateRoundedRectangleGeometry(pill, geometry.put()))) {
+                brush->SetColor(uih::d2d::colorref_to_d2d_color(nocturne_accent_colour));
+                rt->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), geometry.get()), nullptr);
+                rt->FillRectangle(D2D1::RectF(pill_rect.left, pill_rect.bottom - px(filter_underline_thickness),
+                                      pill_rect.right, pill_rect.bottom),
+                    brush.get());
+                rt->PopLayer();
+            }
+        }
+
+        wil::com_ptr<ID2D1StrokeStyle> round_stroke;
+        factory->CreateStrokeStyle(D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                                       D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND),
+            nullptr, 0, round_stroke.put());
+
+        const auto stroke_width = std::max(1.0f, px(1) * 1.5f);
+
+        // 放大鏡：圓圈加一條斜柄
+        {
+            const auto icon = to_rect(layout.icon);
+            const auto size = icon.right - icon.left;
+            const auto centre = D2D1::Point2F(icon.left + size * 0.43f, icon.top + size * 0.43f);
+            const auto radius = size * 0.30f;
+            brush->SetColor(uih::d2d::colorref_to_d2d_color(dim_colour));
+            rt->DrawEllipse(D2D1::Ellipse(centre, radius, radius), brush.get(), stroke_width, round_stroke.get());
+            rt->DrawLine(D2D1::Point2F(centre.x + radius * 0.72f, centre.y + radius * 0.72f),
+                D2D1::Point2F(icon.left + size * 0.92f, icon.top + size * 0.92f), brush.get(), stroke_width,
+                round_stroke.get());
+        }
+
+        // 清除鈕：輸入框有文字才畫；滑過時背後多一個淡淡的圓、叉叉改用文字色
+        if (filter_has_text()) {
+            const auto clear = to_rect(layout.clear);
+            const auto centre = D2D1::Point2F((clear.left + clear.right) / 2, (clear.top + clear.bottom) / 2);
+
+            if (m_filter_clear_hot) {
+                brush->SetColor(uih::d2d::colorref_to_d2d_color(blend_colours(fill_colour, text_colour, 0.14)));
+                rt->FillEllipse(D2D1::Ellipse(centre, px(10), px(10)), brush.get());
+            }
+
+            const auto half = px(4);
+            brush->SetColor(uih::d2d::colorref_to_d2d_color(m_filter_clear_hot ? text_colour : dim_colour));
+            rt->DrawLine(D2D1::Point2F(centre.x - half, centre.y - half),
+                D2D1::Point2F(centre.x + half, centre.y + half), brush.get(), stroke_width, round_stroke.get());
+            rt->DrawLine(D2D1::Point2F(centre.x - half, centre.y + half),
+                D2D1::Point2F(centre.x + half, centre.y - half), brush.get(), stroke_width, round_stroke.get());
+        }
+    }
+
+    const auto hr = rt->EndDraw();
+    if (uih::d2d::is_device_reset_error(hr))
+        m_filter_render_target.reset();
 }
 
 void AlbumListWindow::create_tree()
