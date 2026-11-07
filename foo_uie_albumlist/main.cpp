@@ -10,9 +10,6 @@
 
 namespace {
 
-// Nocturne：主題的重點紅（229,38,43），搜尋框取得焦點時底下那條線用
-constexpr COLORREF nocturne_accent_colour = RGB(229, 38, 43);
-
 // Nocturne：搜尋框的提示字。中文版「搜尋資料夾…」，英文版（編譯時加 NOCTURNE_LANG_EN）「Search folders…」
 #ifdef NOCTURNE_LANG_EN
 constexpr auto filter_cue_text = L"Search folders…";
@@ -50,7 +47,6 @@ constexpr int filter_icon_left_padding = 11;
 constexpr int filter_icon_gap = 8;
 constexpr int filter_clear_width = 26;
 constexpr int filter_clear_right_padding = 4;
-constexpr int filter_underline_thickness = 2;
 constexpr int filter_fill_same_tolerance = 6;     // 各色版差距在這之內就視為「跟背景一樣」
 constexpr double filter_fill_lift_amount = 0.055; // 調亮（深色）／調暗（淺色）的幅度
 
@@ -701,17 +697,19 @@ void AlbumListWindow::paint_filter_strip(HDC dc)
         const auto pill = D2D1::RoundedRect(pill_rect, px(filter_corner_radius), px(filter_corner_radius));
         rt->FillRoundedRectangle(pill, brush.get());
 
-        // 取得焦點：圓角底最下面一條重點紅底線（用圓角底當遮罩，兩端會跟著圓角收掉）
+        // 取得焦點：圓角底外圍一圈淺灰細框（文字色往底色混 50%，深淺色主題都適用）。
+        // 不用重點紅的底線：播放中它會跟正下方的紅色進度條疊在一起，看起來像兩條進度條（2026-11-07 使用者實機看到）
         if (GetFocus() == m_wnd_edit) {
-            wil::com_ptr<ID2D1RoundedRectangleGeometry> geometry;
-            if (SUCCEEDED(factory->CreateRoundedRectangleGeometry(pill, geometry.put()))) {
-                brush->SetColor(uih::d2d::colorref_to_d2d_color(nocturne_accent_colour));
-                rt->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), geometry.get()), nullptr);
-                rt->FillRectangle(D2D1::RectF(pill_rect.left, pill_rect.bottom - px(filter_underline_thickness),
-                                      pill_rect.right, pill_rect.bottom),
-                    brush.get());
-                rt->PopLayer();
-            }
+            const auto ring_width = std::max(1.0f, px(1) * 1.5f);
+            auto ring_rect = pill_rect;
+            ring_rect.left += ring_width / 2;
+            ring_rect.top += ring_width / 2;
+            ring_rect.right -= ring_width / 2;
+            ring_rect.bottom -= ring_width / 2;
+            const auto ring_radius = std::max(0.0f, px(filter_corner_radius) - ring_width / 2);
+
+            brush->SetColor(uih::d2d::colorref_to_d2d_color(blend_colours(fill_colour, text_colour, 0.5)));
+            rt->DrawRoundedRectangle(D2D1::RoundedRect(ring_rect, ring_radius, ring_radius), brush.get(), ring_width);
         }
 
         wil::com_ptr<ID2D1StrokeStyle> round_stroke;
