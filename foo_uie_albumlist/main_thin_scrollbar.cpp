@@ -26,6 +26,11 @@ constexpr BYTE thin_alpha_rest = 61;
 constexpr BYTE thin_alpha_near = 107;
 constexpr BYTE thin_alpha_hot = 158;
 
+// 按住軌道空白處連續翻頁：第一次延遲 400 ms，之後每 50 ms 翻一頁（跟原生滑軌的手感接近）
+constexpr UINT_PTR thin_repeat_timer_id = 1;
+constexpr UINT thin_repeat_first_delay_ms = 400;
+constexpr UINT thin_repeat_interval_ms = 50;
+
 constexpr wchar_t thin_overlay_class_name[] = L"NocturneAlbumListThinScrollbarOverlay";
 
 // 視窗類別只登記一次，模組卸載時（靜態物件解構）才取消登記
@@ -264,6 +269,7 @@ void AlbumListWindow::destroy_thin_overlay()
 
     m_thin_overlay_shown = false;
     m_thin_tracking_leave = false;
+    m_thin_track_holding = false;
 }
 
 // 依目前的捲動範圍、位置與滑鼠狀態更新浮層：沒有可捲的內容就藏起來；內容沒變就什麼都不做
@@ -438,6 +444,46 @@ void AlbumListWindow::drag_thin_scrollbar_to(int mouse_y)
     update_thin_overlay();
 }
 
+// 計時器每次響：游標還在軌道上、而且在滑塊上方或下方，就再翻一頁；滑塊追到游標底下就先不翻（游標移開滑塊又會繼續）
+void AlbumListWindow::repeat_thin_track_page()
+{
+    const auto geometry = get_thin_scrollbar_geometry();
+
+    if (!geometry || !m_wnd_tv)
+        return;
+
+    POINT pt{};
+    GetCursorPos(&pt);
+    ScreenToClient(m_wnd_tv, &pt);
+
+    if (!PtInRect(&geometry->strip, pt))
+        return;
+
+    if (pt.y < geometry->thumb.top)
+        SendMessage(m_wnd_tv, WM_VSCROLL, MAKEWPARAM(SB_PAGEUP, 0), 0);
+    else if (pt.y >= geometry->thumb.bottom)
+        SendMessage(m_wnd_tv, WM_VSCROLL, MAKEWPARAM(SB_PAGEDOWN, 0), 0);
+
+    update_thin_overlay();
+}
+
+void AlbumListWindow::end_thin_track_hold()
+{
+    if (!m_thin_track_holding)
+        return;
+
+    m_thin_track_holding = false;
+
+    if (m_thin_overlay) {
+        KillTimer(m_thin_overlay, thin_repeat_timer_id);
+
+        if (GetCapture() == m_thin_overlay)
+            ReleaseCapture();
+    }
+
+    update_thin_overlay();
+}
+
 void AlbumListWindow::end_thin_scrollbar_drag(bool release_capture)
 {
     if (!m_thin_dragging)
@@ -517,18 +563,32 @@ LRESULT AlbumListWindow::on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, 
             m_thin_drag_grab = pt.y - geometry->thumb.top;
             SetCapture(wnd);
         } else {
+            // 軌道空白處：先翻一頁，按住不放就連續翻（見 repeat_thin_track_page）
             SendMessage(m_wnd_tv, WM_VSCROLL, MAKEWPARAM(pt.y < geometry->thumb.top ? SB_PAGEUP : SB_PAGEDOWN, 0), 0);
+            m_thin_track_holding = true;
+            SetCapture(wnd);
+            SetTimer(wnd, thin_repeat_timer_id, thin_repeat_first_delay_ms, nullptr);
         }
 
         update_thin_overlay();
         return 0;
     }
+    case WM_TIMER:
+        if (wp == thin_repeat_timer_id && m_thin_track_holding) {
+            SetTimer(wnd, thin_repeat_timer_id, thin_repeat_interval_ms, nullptr);
+            repeat_thin_track_page();
+            return 0;
+        }
+
+        return DefWindowProc(wnd, msg, wp, lp);
     case WM_LBUTTONUP:
         end_thin_scrollbar_drag(true);
+        end_thin_track_hold();
         return 0;
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
         end_thin_scrollbar_drag(false);
+        end_thin_track_hold();
         return 0;
     default:
         return DefWindowProc(wnd, msg, wp, lp);

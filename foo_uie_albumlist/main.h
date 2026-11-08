@@ -197,6 +197,8 @@ private:
     bool m_thin_dragging{};
     bool m_thin_tracking_leave{};
     bool m_thin_adjusting{};
+    // 按住軌道空白處時連續翻頁（原生滑軌的行為）
+    bool m_thin_track_holding{};
     int m_thin_drag_grab{};
     mutable int m_thin_bar_width{};
 
@@ -222,6 +224,8 @@ private:
     LRESULT on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
     void update_thin_overlay();
     void destroy_thin_overlay();
+    void repeat_thin_track_page();
+    void end_thin_track_hold();
 
     void apply_thin_scrollbar();
     int get_thin_extra_width() const;
