@@ -290,6 +290,7 @@
     <ClCompile Include=".\fcl.cpp" />
     <ClCompile Include=".\main.cpp" />
     <ClCompile Include=".\main_hook_proc.cpp" />
+    <ClCompile Include=".\main_thin_scrollbar.cpp" />
     <ClCompile Include=".\main_tree_builder.cpp" />
     <ClCompile Include=".\main_window_proc.cpp" />
     <ClCompile Include=".\node.cpp" />

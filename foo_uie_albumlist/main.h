@@ -173,6 +173,44 @@ private:
 
     const std::vector<node_ptr>& get_cleaned_selection();
 
+    // ---- Nocturne：細捲軸（2026-11-08，跟 Columns UI 播放清單同款：平常 4 px、滑鼠靠近右緣變 10 px、不占版面）----
+    // 樹狀清單是系統的 SysTreeView32，原生垂直捲軸（約 17 px）縮不掉也關不掉。做法：把樹視窗做得比面板寬一個捲軸的寬度，
+    // 讓原生捲軸落在面板外面被裁掉（子視窗不會畫到父視窗外），樹的可用寬度因此整條都在面板裡；再自己在樹視窗右緣畫一條細軸，
+    // 拖曳、點軌道轉成 WM_VSCROLL 交給樹處理，滾輪與鍵盤仍由樹原本處理。
+    // 開關是 fb2k 共用設定 nocturne.thinScrollbar（Columns UI 的設定頁寫入，兩邊讀同一個值，改了馬上切換，實作在 main_thin_scrollbar.cpp）
+    struct ThinScrollbarGeometry {
+        RECT strip{};
+        RECT thumb{};
+        int track_top{};
+        int track_height{};
+        int thumb_height{};
+        int range_min{};
+        int position_range{};
+    };
+
+    static inline bool s_thin_scrollbar_enabled{true};
+    static void s_sync_thin_scrollbar_setting();
+
+    bool m_thin_active{};
+    bool m_thin_near{};
+    bool m_thin_thumb_hot{};
+    bool m_thin_dragging{};
+    bool m_thin_tracking_leave{};
+    bool m_thin_adjusting{};
+    int m_thin_drag_grab{};
+    mutable int m_thin_bar_width{};
+
+    void apply_thin_scrollbar();
+    int get_thin_extra_width() const;
+    void sync_thin_scrollbar_layout();
+    std::optional<ThinScrollbarGeometry> get_thin_scrollbar_geometry() const;
+    void paint_thin_scrollbar() const;
+    void invalidate_thin_scrollbar() const;
+    void update_thin_scrollbar_hover(POINT pt);
+    void drag_thin_scrollbar_to(int mouse_y);
+    void end_thin_scrollbar_drag(bool release_capture);
+    std::optional<LRESULT> on_thin_scrollbar_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
+
     HWND m_wnd_tv{nullptr};
     HWND m_wnd_edit{nullptr};
     // Nocturne：搜尋框清除鈕的狀態與繪圖資源
