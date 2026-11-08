@@ -200,16 +200,36 @@ private:
     int m_thin_drag_grab{};
     mutable int m_thin_bar_width{};
 
+    // 浮層（獨立的透明子視窗，滑軌畫在上面；說明見 main_thin_scrollbar.cpp）。座標用樹視窗的工作區座標
+    struct ThinOverlayState {
+        RECT strip{};
+        RECT thumb{};
+        COLORREF colour{};
+        BYTE alpha{};
+
+        bool operator==(const ThinOverlayState& other) const
+        {
+            return EqualRect(&strip, &other.strip) && EqualRect(&thumb, &other.thumb) && colour == other.colour
+                && alpha == other.alpha;
+        }
+    };
+
+    HWND m_thin_overlay{};
+    bool m_thin_overlay_shown{};
+    ThinOverlayState m_thin_overlay_state{};
+
+    static LRESULT CALLBACK s_thin_overlay_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
+    LRESULT on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
+    void update_thin_overlay();
+    void destroy_thin_overlay();
+
     void apply_thin_scrollbar();
     int get_thin_extra_width() const;
     void sync_thin_scrollbar_layout();
     std::optional<ThinScrollbarGeometry> get_thin_scrollbar_geometry() const;
-    void paint_thin_scrollbar() const;
-    void invalidate_thin_scrollbar() const;
     void update_thin_scrollbar_hover(POINT pt);
     void drag_thin_scrollbar_to(int mouse_y);
     void end_thin_scrollbar_drag(bool release_capture);
-    std::optional<LRESULT> on_thin_scrollbar_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
 
     HWND m_wnd_tv{nullptr};
     HWND m_wnd_edit{nullptr};

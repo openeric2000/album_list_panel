@@ -820,7 +820,7 @@ void AlbumListWindow::destroy_tree(bool should_save_scroll_position)
         m_thin_near = false;
         m_thin_thumb_hot = false;
         m_thin_dragging = false;
-        m_thin_tracking_leave = false;
+        destroy_thin_overlay();
 
         DestroyWindow(m_wnd_tv);
         m_wnd_tv = nullptr;

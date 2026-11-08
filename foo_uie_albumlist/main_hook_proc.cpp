@@ -19,27 +19,14 @@ static bool test_point_distance(POINT pt1, POINT pt2, int test)
 
 LRESULT WINAPI AlbumListWindow::on_tree_hooked_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    // Nocturne 細捲軸：右邊緣那條的滑鼠操作先處理；沒處理的才走原本流程
-    if (m_thin_active) {
-        if (const auto result = on_thin_scrollbar_message(wnd, msg, wp, lp))
-            return *result;
-    }
-
     switch (msg) {
     case WM_PAINT:
-        // Nocturne 細捲軸：先把整條軌道併進要重畫的範圍（底下是新畫的），樹畫完再疊畫滑軌
-        if (m_thin_active) {
-            invalidate_thin_scrollbar();
-            const auto result = CallWindowProc(m_treeproc, wnd, msg, wp, lp);
-            paint_thin_scrollbar();
-            sync_thin_scrollbar_layout();
-            return result;
-        }
-        break;
     case WM_SIZE:
+        // Nocturne 細捲軸：樹自己畫完（捲動、展開收合、縮放之後一定會重繪）再校正寬度並更新浮層上的滑軌；滑軌不畫在樹上
         if (m_thin_active) {
             const auto result = CallWindowProc(m_treeproc, wnd, msg, wp, lp);
             sync_thin_scrollbar_layout();
+            update_thin_overlay();
             return result;
         }
         break;

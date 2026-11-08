@@ -2,10 +2,12 @@
 
 #include "main.h"
 
-#pragma comment(lib, "msimg32.lib")
-
-// Nocturne：資料夾樹的細捲軸（2026-11-08）。做法與限制見 main.h 的說明；畫法與數值跟 Columns UI 播放清單（ui_helpers 的 list_view_scroll.cpp）一致。
-// 這裡的捲動單位是「列」（SysTreeView32 的捲軸範圍是可見的列數，不是像素）
+// Nocturne：資料夾樹的細捲軸（2026-11-08）。做法與限制見 main.h 的說明；數值跟 Columns UI 播放清單（ui_helpers 的 list_view_scroll.cpp）一致。
+// 這裡的捲動單位是「列」（SysTreeView32 的捲軸範圍是可見的列數，不是像素）。
+//
+// 滑軌畫在一個獨立的透明浮層子視窗（WS_EX_LAYERED、逐像素 alpha，由 DWM 合成），不畫在樹自己的畫面上：
+// 第一版畫在樹上，樹捲動（ScrollWindow）會把舊的滑軌像素一起捲走、重繪又晚一步，拖曳時看得到鬼影與抖動（使用者回報）。
+// 整條軌道（16 DIP 寬）都是 alpha＝1 的「看不見但吃得到滑鼠」的像素，滑鼠靠近、按下、拖曳都由浮層自己接；靠近時不鋪軌道底色。
 
 namespace {
 
@@ -19,14 +21,44 @@ constexpr int thin_thumb_rest_width = 4;
 constexpr int thin_thumb_near_width = 10;
 constexpr int thin_thumb_min_height = 36;
 
-// 不透明度（0～255）：平常 .24、靠近 .42、滑到滑塊上或拖曳中 .62；靠近時整條軌道淡淡鋪一層 .055
+// 不透明度（0～255）：平常 .24、靠近 .42、滑到滑塊上或拖曳中 .62
 constexpr BYTE thin_alpha_rest = 61;
 constexpr BYTE thin_alpha_near = 107;
 constexpr BYTE thin_alpha_hot = 158;
-constexpr BYTE thin_alpha_track = 14;
 
-// 把一個顏色以指定不透明度疊到 dc 的 rc 範圍上；pill 為真時畫成兩端全圓的膠囊（邊緣用涵蓋率做抗鋸齒）
-void blend_colour(HDC dc, const RECT& rc, COLORREF colour, BYTE alpha, bool pill)
+constexpr wchar_t thin_overlay_class_name[] = L"NocturneAlbumListThinScrollbarOverlay";
+
+// 視窗類別只登記一次，模組卸載時（靜態物件解構）才取消登記
+class ThinOverlayWindowClass {
+public:
+    explicit ThinOverlayWindowClass(WNDPROC proc)
+    {
+        WNDCLASSEX window_class{};
+        window_class.cbSize = sizeof(window_class);
+        window_class.lpfnWndProc = proc;
+        window_class.hInstance = core_api::get_my_instance();
+        window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        window_class.lpszClassName = thin_overlay_class_name;
+        m_atom = RegisterClassEx(&window_class);
+    }
+
+    ~ThinOverlayWindowClass()
+    {
+        if (m_atom)
+            UnregisterClass(MAKEINTATOM(m_atom), core_api::get_my_instance());
+    }
+
+    ThinOverlayWindowClass(const ThinOverlayWindowClass&) = delete;
+    ThinOverlayWindowClass& operator=(const ThinOverlayWindowClass&) = delete;
+
+    [[nodiscard]] bool is_registered() const { return m_atom != 0; }
+
+private:
+    ATOM m_atom{};
+};
+
+// 在預乘 ARGB 的緩衝區裡畫一個兩端全圓的膠囊（邊緣用涵蓋率做抗鋸齒）；涵蓋率為 0 的像素保留原值（alpha＝1 的吃滑鼠像素）
+void draw_pill(uint32_t* pixels, int buffer_width, const RECT& rc, COLORREF colour, BYTE alpha)
 {
     const auto width = rc.right - rc.left;
     const auto height = rc.bottom - rc.top;
@@ -34,70 +66,47 @@ void blend_colour(HDC dc, const RECT& rc, COLORREF colour, BYTE alpha, bool pill
     if (width <= 0 || height <= 0 || alpha == 0)
         return;
 
-    const auto source_width = pill ? width : 1;
-    const auto source_height = pill ? height : 1;
-
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = source_width;
-    info.bmiHeader.biHeight = -source_height;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
-
-    void* bits{};
-    wil::unique_hbitmap bitmap{CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0)};
-
-    if (!bitmap || !bits)
-        return;
-
     const auto red = GetRValue(colour);
     const auto green = GetGValue(colour);
     const auto blue = GetBValue(colour);
 
-    const auto write_pixel = [&](uint32_t* pixel, float coverage) {
-        // AlphaBlend 要的是預乘的 ARGB
-        const auto a = static_cast<uint32_t>(std::lround(alpha * std::clamp(coverage, 0.f, 1.f)));
-        *pixel = (a << 24) | (((red * a + 127) / 255) << 16) | (((green * a + 127) / 255) << 8) | ((blue * a + 127) / 255);
-    };
+    const auto half_width = static_cast<float>(width) * .5f;
+    const auto half_height = static_cast<float>(height) * .5f;
+    const auto radius = std::min(half_width, half_height);
 
-    auto* pixels = static_cast<uint32_t*>(bits);
+    for (int y = 0; y < height; ++y) {
+        const auto py = std::abs(static_cast<float>(y) + .5f - half_height) - (half_height - radius);
 
-    if (!pill) {
-        write_pixel(pixels, 1.f);
-    } else {
-        const auto half_width = static_cast<float>(width) * .5f;
-        const auto half_height = static_cast<float>(height) * .5f;
-        const auto radius = std::min(half_width, half_height);
+        for (int x = 0; x < width; ++x) {
+            const auto px = std::abs(static_cast<float>(x) + .5f - half_width) - (half_width - radius);
+            const auto distance
+                = std::hypot(std::max(px, 0.f), std::max(py, 0.f)) + std::min(std::max(px, py), 0.f) - radius;
+            const auto coverage = std::clamp(.5f - distance, 0.f, 1.f);
+            const auto a = static_cast<uint32_t>(std::lround(alpha * coverage));
 
-        for (int y = 0; y < height; ++y) {
-            const auto py = std::abs(static_cast<float>(y) + .5f - half_height) - (half_height - radius);
+            if (a == 0)
+                continue;
 
-            for (int x = 0; x < width; ++x) {
-                const auto px = std::abs(static_cast<float>(x) + .5f - half_width) - (half_width - radius);
-                const auto distance
-                    = std::hypot(std::max(px, 0.f), std::max(py, 0.f)) + std::min(std::max(px, py), 0.f) - radius;
-                write_pixel(pixels + static_cast<size_t>(y) * width + x, .5f - distance);
-            }
+            pixels[static_cast<size_t>(rc.top + y) * buffer_width + rc.left + x]
+                = (a << 24) | (((red * a + 127) / 255) << 16) | (((green * a + 127) / 255) << 8) | ((blue * a + 127) / 255);
         }
     }
-
-    wil::unique_hdc memory_dc{CreateCompatibleDC(dc)};
-
-    if (!memory_dc)
-        return;
-
-    const auto _ = wil::SelectObject(memory_dc.get(), bitmap.get());
-
-    BLENDFUNCTION blend{};
-    blend.BlendOp = AC_SRC_OVER;
-    blend.SourceConstantAlpha = 255;
-    blend.AlphaFormat = AC_SRC_ALPHA;
-
-    AlphaBlend(dc, rc.left, rc.top, width, height, memory_dc.get(), 0, 0, source_width, source_height, blend);
 }
 
 } // namespace
+
+LRESULT CALLBACK AlbumListWindow::s_thin_overlay_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_MOUSEACTIVATE)
+        return MA_NOACTIVATE;
+
+    const auto window = reinterpret_cast<AlbumListWindow*>(GetWindowLongPtr(wnd, GWLP_USERDATA));
+
+    if (window)
+        return window->on_thin_overlay_message(wnd, msg, wp, lp);
+
+    return DefWindowProc(wnd, msg, wp, lp);
+}
 
 // 讀共用設定並（第一次呼叫時）登記變更通知：Columns UI 設定頁改了開關，所有樹當場切換
 void AlbumListWindow::s_sync_thin_scrollbar_setting()
@@ -141,12 +150,19 @@ void AlbumListWindow::apply_thin_scrollbar()
     m_thin_near = false;
     m_thin_thumb_hot = false;
 
+    // 關掉就把浮層拿掉；開啟（含重建樹之後）要重新放到最上層，免得被新建的樹蓋住
+    if (!wanted)
+        destroy_thin_overlay();
+    else
+        m_thin_overlay_shown = false;
+
     if (!m_wnd_tv)
         return;
 
     // 重排樹的寬度（開：多出原生捲軸的寬度讓它被裁掉；關：還原），再把原生捲軸與整棵樹重畫
     on_size();
     RedrawWindow(m_wnd_tv, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
+    update_thin_overlay();
 }
 
 int AlbumListWindow::get_thin_extra_width() const
@@ -239,66 +255,138 @@ std::optional<AlbumListWindow::ThinScrollbarGeometry> AlbumListWindow::get_thin_
     return geometry;
 }
 
-// 樹自己畫完之後呼叫，直接把滑軌疊畫在樹視窗上（WM_PAINT 之前已把整條軌道併進要重畫的範圍，所以底下是新畫的、不會疊兩次透明度）
-void AlbumListWindow::paint_thin_scrollbar() const
+void AlbumListWindow::destroy_thin_overlay()
 {
-    const auto geometry = get_thin_scrollbar_geometry();
+    if (m_thin_overlay) {
+        DestroyWindow(m_thin_overlay);
+        m_thin_overlay = nullptr;
+    }
 
-    if (!geometry || !m_item_colours)
-        return;
-
-    const auto dc = GetDC(m_wnd_tv);
-
-    if (!dc)
-        return;
-
-    const auto release = gsl::finally([this, dc] { ReleaseDC(m_wnd_tv, dc); });
-
-    IntersectClipRect(dc, geometry->strip.left, geometry->strip.top, geometry->strip.right, geometry->strip.bottom);
-
-    const auto text_colour = m_item_colours->get_colour(cui::colours::colour_text);
-    const auto is_near = m_thin_near || m_thin_dragging;
-
-    if (is_near)
-        blend_colour(dc, geometry->strip, text_colour, thin_alpha_track, false);
-
-    const auto alpha = m_thin_dragging || m_thin_thumb_hot ? thin_alpha_hot
-        : is_near                                          ? thin_alpha_near
-                                                           : thin_alpha_rest;
-    blend_colour(dc, geometry->thumb, text_colour, alpha, true);
+    m_thin_overlay_shown = false;
+    m_thin_tracking_leave = false;
 }
 
-void AlbumListWindow::invalidate_thin_scrollbar() const
+// 依目前的捲動範圍、位置與滑鼠狀態更新浮層：沒有可捲的內容就藏起來；內容沒變就什麼都不做
+void AlbumListWindow::update_thin_overlay()
 {
-    if (!m_wnd_tv)
+    const auto panel = get_wnd();
+
+    if (!panel || !m_wnd_tv)
         return;
 
-    RECT client{};
-    GetClientRect(m_wnd_tv, &client);
-    const RECT strip{client.right - uih::scale_dpi_value(thin_strip_width), client.top, client.right, client.bottom};
-    InvalidateRect(m_wnd_tv, &strip, FALSE);
+    const auto geometry = m_thin_active ? get_thin_scrollbar_geometry() : std::nullopt;
+
+    if (!geometry) {
+        if (m_thin_overlay && m_thin_overlay_shown)
+            ShowWindow(m_thin_overlay, SW_HIDE);
+
+        m_thin_overlay_shown = false;
+        return;
+    }
+
+    static const ThinOverlayWindowClass window_class(&AlbumListWindow::s_thin_overlay_proc);
+
+    if (!window_class.is_registered() || !m_item_colours)
+        return;
+
+    const auto colour = m_item_colours->get_colour(cui::colours::colour_text);
+    const BYTE alpha = m_thin_dragging || m_thin_thumb_hot ? thin_alpha_hot
+        : m_thin_near                                      ? thin_alpha_near
+                                                           : thin_alpha_rest;
+
+    ThinOverlayState state{geometry->strip, geometry->thumb, colour, alpha};
+
+    if (m_thin_overlay && m_thin_overlay_shown && state == m_thin_overlay_state)
+        return;
+
+    if (!m_thin_overlay) {
+        m_thin_overlay = CreateWindowEx(WS_EX_LAYERED, thin_overlay_class_name, L"", WS_CHILD, 0, 0, 0, 0, panel,
+            nullptr, core_api::get_my_instance(), nullptr);
+
+        if (!m_thin_overlay)
+            return;
+
+        SetWindowLongPtr(m_thin_overlay, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        m_thin_overlay_shown = false;
+    }
+
+    const auto width = state.strip.right - state.strip.left;
+    const auto height = state.strip.bottom - state.strip.top;
+
+    if (width <= 0 || height <= 0)
+        return;
+
+    // 位置或大小變了（或第一次顯示）才動視窗；放最上層，免得被樹（後建立的兄弟視窗）蓋住
+    if (!m_thin_overlay_shown || !EqualRect(&state.strip, &m_thin_overlay_state.strip)) {
+        POINT origin{state.strip.left, state.strip.top};
+        MapWindowPoints(m_wnd_tv, panel, &origin, 1);   // 樹的工作區座標 → 面板的工作區座標
+        SetWindowPos(m_thin_overlay, HWND_TOP, origin.x, origin.y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    void* bits{};
+    wil::unique_hbitmap bitmap{CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0)};
+
+    if (!bitmap || !bits)
+        return;
+
+    auto* pixels = static_cast<uint32_t*>(bits);
+    std::fill_n(pixels, static_cast<size_t>(width) * height, 0x01000000u);
+
+    const RECT thumb_in_overlay{state.thumb.left - state.strip.left, state.thumb.top - state.strip.top,
+        state.thumb.right - state.strip.left, state.thumb.bottom - state.strip.top};
+    draw_pill(pixels, width, thumb_in_overlay, state.colour, state.alpha);
+
+    const auto screen_dc = wil::GetDC(nullptr);
+    wil::unique_hdc memory_dc{CreateCompatibleDC(screen_dc.get())};
+
+    if (!memory_dc)
+        return;
+
+    const auto _ = wil::SelectObject(memory_dc.get(), bitmap.get());
+
+    SIZE size{width, height};
+    POINT source{0, 0};
+    BLENDFUNCTION blend{};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+
+    if (UpdateLayeredWindow(m_thin_overlay, screen_dc.get(), nullptr, &size, memory_dc.get(), &source, 0, &blend, ULW_ALPHA)) {
+        m_thin_overlay_state = state;
+        m_thin_overlay_shown = true;
+    }
 }
 
 void AlbumListWindow::update_thin_scrollbar_hover(POINT pt)
 {
     const auto geometry = get_thin_scrollbar_geometry();
-    const bool in_strip = geometry && PtInRect(&geometry->strip, pt);
+
+    if (!geometry)
+        return;
 
     // 滑塊的「熱區」用靠近時的寬度算，y 在滑塊範圍內就算（不用精準點到 4 px 細條）
-    const bool on_thumb = in_strip && pt.y >= geometry->thumb.top && pt.y < geometry->thumb.bottom
+    const bool on_thumb = pt.y >= geometry->thumb.top && pt.y < geometry->thumb.bottom
         && pt.x >= geometry->strip.right - uih::scale_dpi_value(thin_thumb_right_inset + thin_thumb_near_width);
 
-    if (in_strip && !m_thin_tracking_leave) {
-        TRACKMOUSEEVENT track_mouse_event{sizeof(TRACKMOUSEEVENT), TME_LEAVE, m_wnd_tv, 0};
+    if (!m_thin_tracking_leave && m_thin_overlay) {
+        TRACKMOUSEEVENT track_mouse_event{sizeof(TRACKMOUSEEVENT), TME_LEAVE, m_thin_overlay, 0};
         m_thin_tracking_leave = TrackMouseEvent(&track_mouse_event) != 0;
     }
 
-    if (in_strip == m_thin_near && on_thumb == m_thin_thumb_hot)
+    if (m_thin_near && on_thumb == m_thin_thumb_hot)
         return;
 
-    m_thin_near = in_strip;
+    m_thin_near = true;
     m_thin_thumb_hot = on_thumb;
-    invalidate_thin_scrollbar();
+    update_thin_overlay();
 }
 
 void AlbumListWindow::drag_thin_scrollbar_to(int mouse_y)
@@ -327,6 +415,9 @@ void AlbumListWindow::drag_thin_scrollbar_to(int mouse_y)
     if (!GetScrollInfo(m_wnd_tv, SB_VERT, &info))
         return;
 
+    if (row == info.nPos)
+        return;
+
     auto item = TreeView_GetFirstVisible(m_wnd_tv);
     auto steps = row - info.nPos;
     const auto direction = steps > 0 ? TVGN_NEXTVISIBLE : TVGN_PREVIOUSVISIBLE;
@@ -344,7 +435,7 @@ void AlbumListWindow::drag_thin_scrollbar_to(int mouse_y)
     if (item)
         TreeView_SelectSetFirstVisible(m_wnd_tv, item);
 
-    invalidate_thin_scrollbar();
+    update_thin_overlay();
 }
 
 void AlbumListWindow::end_thin_scrollbar_drag(bool release_capture)
@@ -354,41 +445,51 @@ void AlbumListWindow::end_thin_scrollbar_drag(bool release_capture)
 
     m_thin_dragging = false;
 
-    if (release_capture && m_wnd_tv && GetCapture() == m_wnd_tv)
+    if (release_capture && m_thin_overlay && GetCapture() == m_thin_overlay)
         ReleaseCapture();
-
-    if (!m_wnd_tv)
-        return;
-
-    SendMessage(m_wnd_tv, WM_VSCROLL, MAKEWPARAM(SB_ENDSCROLL, 0), 0);
 
     // 放開後依游標目前的位置決定要不要維持「靠近」的樣子
     POINT pt{};
     GetCursorPos(&pt);
-    ScreenToClient(m_wnd_tv, &pt);
+
+    RECT overlay_rect{};
+    const auto over_overlay = m_thin_overlay && m_thin_overlay_shown && GetWindowRect(m_thin_overlay, &overlay_rect)
+        && PtInRect(&overlay_rect, pt);
 
     m_thin_near = false;
     m_thin_thumb_hot = false;
-    update_thin_scrollbar_hover(pt);
-    invalidate_thin_scrollbar();
+
+    if (over_overlay && m_wnd_tv) {
+        ScreenToClient(m_wnd_tv, &pt);
+        update_thin_scrollbar_hover(pt);
+    }
+
+    update_thin_overlay();
 }
 
-std::optional<LRESULT> AlbumListWindow::on_thin_scrollbar_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
+LRESULT AlbumListWindow::on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    // 浮層的座標換成樹視窗工作區的座標
+    const auto to_tree = [this](LPARAM l) {
+        return POINT{GET_X_LPARAM(l) + m_thin_overlay_state.strip.left, GET_Y_LPARAM(l) + m_thin_overlay_state.strip.top};
+    };
+
     switch (msg) {
+    case WM_SETCURSOR: {
+        static const auto cursor = LoadCursor(nullptr, IDC_ARROW);
+        SetCursor(cursor);
+        return TRUE;
+    }
     case WM_MOUSEMOVE: {
-        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        const auto pt = to_tree(lp);
 
         if (m_thin_dragging) {
             drag_thin_scrollbar_to(pt.y);
             return 0;
         }
 
-        // 按著左鍵（框選、拖放項目）時不理會滑軌的懸停
-        if ((wp & (MK_LBUTTON | MK_RBUTTON)) == 0)
-            update_thin_scrollbar_hover(pt);
-
-        return std::nullopt;
+        update_thin_scrollbar_hover(pt);
+        return 0;
     }
     case WM_MOUSELEAVE:
         m_thin_tracking_leave = false;
@@ -396,17 +497,17 @@ std::optional<LRESULT> AlbumListWindow::on_thin_scrollbar_message(HWND wnd, UINT
         if (!m_thin_dragging && (m_thin_near || m_thin_thumb_hot)) {
             m_thin_near = false;
             m_thin_thumb_hot = false;
-            invalidate_thin_scrollbar();
+            update_thin_overlay();
         }
 
-        return std::nullopt;
+        return 0;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK: {
-        const POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        const auto pt = to_tree(lp);
         const auto geometry = get_thin_scrollbar_geometry();
 
-        if (!geometry || !PtInRect(&geometry->strip, pt))
-            return std::nullopt;
+        if (!geometry || !m_wnd_tv)
+            return 0;
 
         // 右邊緣這條是滑軌：不選取底下的項目、不開始拖放，也不搶焦點（跟原生滑軌一樣）
         m_thin_near = true;
@@ -416,24 +517,20 @@ std::optional<LRESULT> AlbumListWindow::on_thin_scrollbar_message(HWND wnd, UINT
             m_thin_drag_grab = pt.y - geometry->thumb.top;
             SetCapture(wnd);
         } else {
-            SendMessage(wnd, WM_VSCROLL, MAKEWPARAM(pt.y < geometry->thumb.top ? SB_PAGEUP : SB_PAGEDOWN, 0), 0);
+            SendMessage(m_wnd_tv, WM_VSCROLL, MAKEWPARAM(pt.y < geometry->thumb.top ? SB_PAGEUP : SB_PAGEDOWN, 0), 0);
         }
 
-        invalidate_thin_scrollbar();
+        update_thin_overlay();
         return 0;
     }
     case WM_LBUTTONUP:
-        if (m_thin_dragging) {
-            end_thin_scrollbar_drag(true);
-            return 0;
-        }
-
-        return std::nullopt;
+        end_thin_scrollbar_drag(true);
+        return 0;
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
         end_thin_scrollbar_drag(false);
-        return std::nullopt;
+        return 0;
     default:
-        return std::nullopt;
+        return DefWindowProc(wnd, msg, wp, lp);
     }
 }
