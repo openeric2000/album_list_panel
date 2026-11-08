@@ -136,6 +136,8 @@ private:
     // 否則圓角底會融進背景看不出來
     static COLORREF get_filter_fill_colour(COLORREF configured_fill, COLORREF strip_background);
     FilterLayout get_filter_layout(int cx, int cy) const;
+    // 搜尋框圓角底離面板左右邊緣的距離（實際像素）；水平細捲軸的軌道左右端對齊它（見 main_thin_scrollbar.cpp）
+    int get_filter_horizontal_margin() const;
     FilterLayout get_filter_layout() const;
     bool filter_has_text() const;
     bool is_over_filter_clear_button(POINT pt) const;
@@ -173,34 +175,24 @@ private:
 
     const std::vector<node_ptr>& get_cleaned_selection();
 
-    // ---- Nocturne：細捲軸（2026-11-08，跟 Columns UI 播放清單同款：平常 4 px、滑鼠靠近右緣變 10 px、不占版面）----
-    // 樹狀清單是系統的 SysTreeView32，原生垂直捲軸（約 17 px）縮不掉也關不掉。做法：把樹視窗做得比面板寬一個捲軸的寬度，
-    // 讓原生捲軸落在面板外面被裁掉（子視窗不會畫到父視窗外），樹的可用寬度因此整條都在面板裡；再自己在樹視窗右緣畫一條細軸，
-    // 拖曳、點軌道轉成 WM_VSCROLL 交給樹處理，滾輪與鍵盤仍由樹原本處理。
+    // ---- Nocturne：細捲軸（2026-11-08，跟 Columns UI 播放清單同款：平常 4 px、滑鼠靠近變 10 px、不占版面）----
+    // 樹狀清單是系統的 SysTreeView32，原生捲軸（垂直、水平各約 17 px）縮不掉也關不掉。做法：把樹視窗做得比面板大一個捲軸的厚度
+    // （垂直捲軸可見時多出寬度、水平捲軸可見時多出高度），再用視窗區域（SetWindowRgn）把多出來的部分剪掉，
+    // 原生捲軸因此不會顯示、也點不到，樹的可用範圍整個都在面板裡；再自己在樹視窗的右緣（垂直）與下緣（水平）各畫一條細軸，
+    // 拖曳、點軌道轉成 WM_VSCROLL／WM_HSCROLL 交給樹處理，滾輪與鍵盤仍由樹原本處理。
+    // 水平軸是 11/08 晚補的（使用者在設定裡開了「顯示水平捲軸」，看到還是原生粗軸）。
     // 開關是 fb2k 共用設定 nocturne.thinScrollbar（Columns UI 的設定頁寫入，兩邊讀同一個值，改了馬上切換，實作在 main_thin_scrollbar.cpp）
+    enum class ThinAxis { vertical, horizontal };
+
     struct ThinScrollbarGeometry {
-        RECT strip{};
+        RECT strip{};        // 浮層範圍（樹工作區座標）
         RECT thumb{};
-        int track_top{};
-        int track_height{};
-        int thumb_height{};
+        int track_start{};   // 軌道沿捲動方向的起點與長度（垂直＝y、水平＝x）
+        int track_length{};
+        int thumb_length{};
         int range_min{};
         int position_range{};
     };
-
-    static inline bool s_thin_scrollbar_enabled{true};
-    static void s_sync_thin_scrollbar_setting();
-
-    bool m_thin_active{};
-    bool m_thin_near{};
-    bool m_thin_thumb_hot{};
-    bool m_thin_dragging{};
-    bool m_thin_tracking_leave{};
-    bool m_thin_adjusting{};
-    // 按住軌道空白處時連續翻頁（原生滑軌的行為）
-    bool m_thin_track_holding{};
-    int m_thin_drag_grab{};
-    mutable int m_thin_bar_width{};
 
     // 浮層（獨立的透明子視窗，滑軌畫在上面；說明見 main_thin_scrollbar.cpp）。座標用樹視窗的工作區座標
     struct ThinOverlayState {
@@ -216,24 +208,54 @@ private:
         }
     };
 
-    HWND m_thin_overlay{};
-    bool m_thin_overlay_shown{};
-    ThinOverlayState m_thin_overlay_state{};
+    // 垂直、水平各一份狀態（各自一個浮層視窗）
+    struct ThinAxisState {
+        bool pointer_near{};
+        bool thumb_hot{};
+        bool dragging{};
+        bool tracking_leave{};
+        // 按住軌道空白處時連續翻頁（原生滑軌的行為）
+        bool track_holding{};
+        int drag_grab{};
+        HWND overlay{};
+        bool overlay_shown{};
+        ThinOverlayState overlay_state{};
+    };
+
+    static inline bool s_thin_scrollbar_enabled{true};
+    static void s_sync_thin_scrollbar_setting();
+
+    bool m_thin_active{};
+    bool m_thin_adjusting{};
+    // 樹視窗現在有沒有套視窗區域（剪掉多出來的原生捲軸）
+    bool m_thin_clipped{};
+    mutable int m_thin_bar_width{};
+    mutable int m_thin_bar_height{};
+    ThinAxisState m_thin_axes[2]{};
+
+    ThinAxisState& thin_axis(ThinAxis axis) { return m_thin_axes[static_cast<size_t>(axis)]; }
+    const ThinAxisState& thin_axis(ThinAxis axis) const { return m_thin_axes[static_cast<size_t>(axis)]; }
 
     static LRESULT CALLBACK s_thin_overlay_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
     LRESULT on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
     void update_thin_overlay();
+    void update_thin_overlay(ThinAxis axis);
     void destroy_thin_overlay();
-    void repeat_thin_track_page();
-    void end_thin_track_hold();
+    void repeat_thin_track_page(ThinAxis axis);
+    void end_thin_track_hold(ThinAxis axis);
 
     void apply_thin_scrollbar();
     int get_thin_extra_width() const;
+    int get_thin_extra_height() const;
+    void apply_thin_clip(int width, int height, bool clip);
+    int get_tree_view_height(int cx, int cy) const;
     void sync_thin_scrollbar_layout();
-    std::optional<ThinScrollbarGeometry> get_thin_scrollbar_geometry() const;
-    void update_thin_scrollbar_hover(POINT pt);
-    void drag_thin_scrollbar_to(int mouse_y);
-    void end_thin_scrollbar_drag(bool release_capture);
+    bool is_thin_axis_scrollable(ThinAxis axis) const;
+    std::optional<ThinScrollbarGeometry> get_thin_scrollbar_geometry(ThinAxis axis) const;
+    void update_thin_scrollbar_hover(ThinAxis axis, POINT pt);
+    void drag_thin_scrollbar_to(ThinAxis axis, POINT pt);
+    void end_thin_scrollbar_drag(ThinAxis axis, bool release_capture);
+    void clear_thin_state();
 
     HWND m_wnd_tv{nullptr};
     HWND m_wnd_edit{nullptr};

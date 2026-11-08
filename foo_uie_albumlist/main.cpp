@@ -451,20 +451,31 @@ void AlbumListWindow::destroy_filter()
     m_filter_ptr.release();
 }
 
+int AlbumListWindow::get_tree_view_height(int cx, int cy) const
+{
+    const auto layout = get_filter_layout(cx, cy);
+    return cy - (layout.strip.bottom - layout.strip.top);
+}
+
 void AlbumListWindow::on_size(unsigned cx, unsigned cy)
 {
     const auto layout = get_filter_layout(gsl::narrow<int>(cx), gsl::narrow<int>(cy));
     const auto strip_height = layout.strip.bottom - layout.strip.top;
+    const auto tv_width = gsl::narrow<int>(cx);
     const auto tv_height = gsl::narrow<int>(cy) - strip_height;
 
+    // Nocturne 細捲軸：原生垂直（水平）捲軸可見時，樹視窗比面板寬（高）一個捲軸的厚度，再用視窗區域把多出來的部分剪掉（見 main.h）
+    const auto extra_width = get_thin_extra_width();
+    const auto extra_height = get_thin_extra_height();
+
     HDWP dwp = BeginDeferWindowPos(2);
-    // Nocturne 細捲軸：原生垂直捲軸可見時，樹視窗比面板寬一個捲軸的寬度，讓原生捲軸落在面板外面被裁掉（見 main.h）
-    dwp = DeferWindowPos(
-        dwp, m_wnd_tv, nullptr, 0, 0, gsl::narrow<int>(cx) + get_thin_extra_width(), tv_height, SWP_NOZORDER);
+    dwp = DeferWindowPos(dwp, m_wnd_tv, nullptr, 0, 0, tv_width + extra_width, tv_height + extra_height, SWP_NOZORDER);
     if (m_wnd_edit)
         dwp = DeferWindowPos(dwp, m_wnd_edit, nullptr, layout.edit.left, layout.edit.top,
             layout.edit.right - layout.edit.left, layout.edit.bottom - layout.edit.top, SWP_NOZORDER);
     EndDeferWindowPos(dwp);
+
+    apply_thin_clip(tv_width, tv_height, extra_width > 0 || extra_height > 0);
 
     // 視窗沒有 CS_HREDRAW／CS_VREDRAW，改變大小時搜尋框那一列不會自動重畫
     if (m_wnd_edit && !IsRectEmpty(&layout.strip))
@@ -540,6 +551,11 @@ AlbumListWindow::FilterLayout AlbumListWindow::get_filter_layout(int cx, int cy)
     layout.edit.bottom = layout.edit.top + font_height;
 
     return layout;
+}
+
+int AlbumListWindow::get_filter_horizontal_margin() const
+{
+    return scale_for_dpi(filter_margin_x, uih::dpi::get_dpi_for_window(get_wnd()));
 }
 
 AlbumListWindow::FilterLayout AlbumListWindow::get_filter_layout() const
@@ -816,11 +832,7 @@ void AlbumListWindow::destroy_tree(bool should_save_scroll_position)
             save_scroll_position();
 
         // Nocturne 細捲軸：視窗要沒了，狀態一併清掉（不呼叫 apply_thin_scrollbar，免得去重排一個正在銷毀的視窗）
-        m_thin_active = false;
-        m_thin_near = false;
-        m_thin_thumb_hot = false;
-        m_thin_dragging = false;
-        destroy_thin_overlay();
+        clear_thin_state();
 
         DestroyWindow(m_wnd_tv);
         m_wnd_tv = nullptr;

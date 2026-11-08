@@ -2,12 +2,13 @@
 
 #include "main.h"
 
-// Nocturne：資料夾樹的細捲軸（2026-11-08）。做法與限制見 main.h 的說明；數值跟 Columns UI 播放清單（ui_helpers 的 list_view_scroll.cpp）一致。
-// 這裡的捲動單位是「列」（SysTreeView32 的捲軸範圍是可見的列數，不是像素）。
+// Nocturne：資料夾樹的細捲軸（2026-11-08；垂直先做，水平 11/08 晚補）。做法與限制見 main.h 的說明；數值跟 Columns UI 播放清單（ui_helpers 的 list_view_scroll.cpp）一致。
+// 垂直軸的捲動單位是「列」（SysTreeView32 的垂直捲軸範圍是可見的列數，不是像素），水平軸是像素。
 //
-// 滑軌畫在一個獨立的透明浮層子視窗（WS_EX_LAYERED、逐像素 alpha，由 DWM 合成），不畫在樹自己的畫面上：
+// 滑軌畫在獨立的透明浮層子視窗（WS_EX_LAYERED、逐像素 alpha，由 DWM 合成），不畫在樹自己的畫面上：
 // 第一版畫在樹上，樹捲動（ScrollWindow）會把舊的滑軌像素一起捲走、重繪又晚一步，拖曳時看得到鬼影與抖動（使用者回報）。
-// 整條軌道（16 DIP 寬）都是 alpha＝1 的「看不見但吃得到滑鼠」的像素，滑鼠靠近、按下、拖曳都由浮層自己接；靠近時不鋪軌道底色。
+// 整條軌道（16 DIP 厚）都是 alpha＝1 的「看不見但吃得到滑鼠」的像素，滑鼠靠近、按下、拖曳都由浮層自己接；靠近時不鋪軌道底色。
+// 垂直、水平各一個浮層；兩條同時出現時各自讓出右下角那一格，免得重疊（浮層重疊的話一次點擊會送給兩個視窗）。
 
 namespace {
 
@@ -30,6 +31,9 @@ constexpr BYTE thin_alpha_hot = 158;
 constexpr UINT_PTR thin_repeat_timer_id = 1;
 constexpr UINT thin_repeat_first_delay_ms = 400;
 constexpr UINT thin_repeat_interval_ms = 50;
+
+// WM_HSCROLL(SB_THUMBTRACK) 的位置只有 16 位元
+constexpr int thin_max_scroll_message_position = 0x7FFF;
 
 constexpr wchar_t thin_overlay_class_name[] = L"NocturneAlbumListThinScrollbarOverlay";
 
@@ -98,6 +102,25 @@ void draw_pill(uint32_t* pixels, int buffer_width, const RECT& rc, COLORREF colo
     }
 }
 
+// 原生捲軸實際占的厚度＝視窗大小減工作區大小，再扣掉邊框。不用 GetScrollBarInfo：它回報的比實際少 1～3 px
+// （2026-11-08 實測 169，水平軸實際 17 px、回報 14～16），樹的最下面一列就會多露出 1 px 原生捲軸。
+// 這個值跟視窗現在多大無關（非工作區的厚度固定）；沒有該方向的捲軸時是 0
+int measure_native_scrollbar_thickness(HWND wnd, bool horizontal)
+{
+    RECT window_rect{};
+    RECT client_rect{};
+    WINDOWINFO info{};
+    info.cbSize = sizeof(info);
+
+    if (!GetWindowRect(wnd, &window_rect) || !GetClientRect(wnd, &client_rect) || !GetWindowInfo(wnd, &info))
+        return 0;
+
+    if (horizontal)
+        return (window_rect.bottom - window_rect.top) - client_rect.bottom - 2 * static_cast<int>(info.cyWindowBorders);
+
+    return (window_rect.right - window_rect.left) - client_rect.right - 2 * static_cast<int>(info.cxWindowBorders);
+}
+
 } // namespace
 
 LRESULT CALLBACK AlbumListWindow::s_thin_overlay_proc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -149,25 +172,46 @@ void AlbumListWindow::apply_thin_scrollbar()
     if (wanted == m_thin_active)
         return;
 
-    end_thin_scrollbar_drag(true);
+    end_thin_scrollbar_drag(ThinAxis::vertical, true);
+    end_thin_scrollbar_drag(ThinAxis::horizontal, true);
 
     m_thin_active = wanted;
-    m_thin_near = false;
-    m_thin_thumb_hot = false;
+
+    for (auto& state : m_thin_axes) {
+        state.pointer_near = false;
+        state.thumb_hot = false;
+    }
 
     // 關掉就把浮層拿掉；開啟（含重建樹之後）要重新放到最上層，免得被新建的樹蓋住
-    if (!wanted)
+    if (!wanted) {
         destroy_thin_overlay();
-    else
-        m_thin_overlay_shown = false;
+    } else {
+        for (auto& state : m_thin_axes)
+            state.overlay_shown = false;
+    }
 
     if (!m_wnd_tv)
         return;
 
-    // 重排樹的寬度（開：多出原生捲軸的寬度讓它被裁掉；關：還原），再把原生捲軸與整棵樹重畫
+    // 重排樹的大小（開：多出原生捲軸的厚度再剪掉；關：還原、拿掉視窗區域），再把原生捲軸與整棵樹重畫
     on_size();
     RedrawWindow(m_wnd_tv, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
     update_thin_overlay();
+}
+
+// 視窗要銷毀了（或重建樹之前）：狀態一併清掉，不呼叫 apply_thin_scrollbar，免得去重排一個正在銷毀的視窗
+void AlbumListWindow::clear_thin_state()
+{
+    m_thin_active = false;
+    m_thin_clipped = false;
+
+    for (auto& state : m_thin_axes) {
+        state.pointer_near = false;
+        state.thumb_hot = false;
+        state.dragging = false;
+    }
+
+    destroy_thin_overlay();
 }
 
 int AlbumListWindow::get_thin_extra_width() const
@@ -180,20 +224,54 @@ int AlbumListWindow::get_thin_extra_width() const
         return 0;
 
     // 原生捲軸可見時量它實際的寬度（視窗所在螢幕的縮放不一定跟系統縮放相同）；量不到就沿用上次量到的或系統值
-    SCROLLBARINFO info{};
-    info.cbSize = sizeof(info);
+    const auto width = measure_native_scrollbar_thickness(m_wnd_tv, false);
 
-    if (GetScrollBarInfo(m_wnd_tv, OBJID_VSCROLL, &info) && !(info.rgstate[0] & STATE_SYSTEM_INVISIBLE)) {
-        const auto width = info.rcScrollBar.right - info.rcScrollBar.left;
-
-        if (width > 0)
-            m_thin_bar_width = width;
-    }
+    if (width > 0)
+        m_thin_bar_width = width;
 
     return m_thin_bar_width > 0 ? m_thin_bar_width : GetSystemMetrics(SM_CXVSCROLL);
 }
 
-// 原生捲軸出現或消失後（新增節點、展開收合、縮放視窗），樹視窗的寬度也要跟著換：有捲軸時多出捲軸寬度、沒有時剛好等於面板寬
+// 跟 get_thin_extra_width 一樣，水平捲軸的版本：有水平捲軸時樹視窗要多出捲軸的高度，下緣那一條再被剪掉
+int AlbumListWindow::get_thin_extra_height() const
+{
+    if (!m_thin_active || !m_wnd_tv)
+        return 0;
+
+    if (!(GetWindowLongPtr(m_wnd_tv, GWL_STYLE) & WS_HSCROLL))
+        return 0;
+
+    const auto height = measure_native_scrollbar_thickness(m_wnd_tv, true);
+
+    if (height > 0)
+        m_thin_bar_height = height;
+
+    return m_thin_bar_height > 0 ? m_thin_bar_height : GetSystemMetrics(SM_CYHSCROLL);
+}
+
+// 把樹視窗剪成「面板裡該給樹的那一塊」（視窗座標，樹視窗左上角就是 (0,0)）：多出來的原生捲軸就看不到也點不到。
+// 沒有多出來的部分時拿掉區域，行為跟沒開細捲軸時完全一樣
+void AlbumListWindow::apply_thin_clip(int width, int height, bool clip)
+{
+    if (!m_wnd_tv)
+        return;
+
+    if (clip) {
+        wil::unique_hrgn region{CreateRectRgn(0, 0, std::max(width, 0), std::max(height, 0))};
+
+        // SetWindowRgn 成功之後區域歸系統所有，不能再自己釋放
+        if (region && SetWindowRgn(m_wnd_tv, region.get(), TRUE)) {
+            region.release();
+            m_thin_clipped = true;
+        }
+    } else if (m_thin_clipped) {
+        SetWindowRgn(m_wnd_tv, nullptr, TRUE);
+        m_thin_clipped = false;
+    }
+}
+
+// 原生捲軸出現或消失後（新增節點、展開收合、縮放視窗），樹視窗的大小也要跟著換：
+// 有垂直捲軸時多出捲軸寬度、有水平捲軸時多出捲軸高度，沒有時剛好等於面板給樹的那一塊
 void AlbumListWindow::sync_thin_scrollbar_layout()
 {
     if (!m_thin_active || m_thin_adjusting || !m_wnd_tv)
@@ -205,23 +283,44 @@ void AlbumListWindow::sync_thin_scrollbar_layout()
     RECT tree_rect{};
     GetWindowRect(m_wnd_tv, &tree_rect);
 
-    if (tree_rect.right - tree_rect.left == panel_rect.right + get_thin_extra_width())
+    const auto expected_width = panel_rect.right + get_thin_extra_width();
+    const auto expected_height = get_tree_view_height(panel_rect.right, panel_rect.bottom) + get_thin_extra_height();
+
+    if (tree_rect.right - tree_rect.left == expected_width && tree_rect.bottom - tree_rect.top == expected_height)
         return;
 
     pfc::vartoggle_t guard(m_thin_adjusting, true);
     on_size();
 }
 
-std::optional<AlbumListWindow::ThinScrollbarGeometry> AlbumListWindow::get_thin_scrollbar_geometry() const
+bool AlbumListWindow::is_thin_axis_scrollable(ThinAxis axis) const
+{
+    if (!m_thin_active || !m_wnd_tv)
+        return false;
+
+    SCROLLINFO info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SIF_RANGE | SIF_PAGE;
+
+    if (!GetScrollInfo(m_wnd_tv, axis == ThinAxis::vertical ? SB_VERT : SB_HORZ, &info))
+        return false;
+
+    const auto total = static_cast<int64_t>(info.nMax) - info.nMin + 1;
+    return info.nPage != 0 && total > static_cast<int64_t>(info.nPage);
+}
+
+std::optional<AlbumListWindow::ThinScrollbarGeometry> AlbumListWindow::get_thin_scrollbar_geometry(ThinAxis axis) const
 {
     if (!m_thin_active || !m_wnd_tv)
         return std::nullopt;
+
+    const auto vertical = axis == ThinAxis::vertical;
 
     SCROLLINFO info{};
     info.cbSize = sizeof(info);
     info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
 
-    if (!GetScrollInfo(m_wnd_tv, SB_VERT, &info))
+    if (!GetScrollInfo(m_wnd_tv, vertical ? SB_VERT : SB_HORZ, &info))
         return std::nullopt;
 
     const auto total = static_cast<int64_t>(info.nMax) - info.nMin + 1;
@@ -232,61 +331,88 @@ std::optional<AlbumListWindow::ThinScrollbarGeometry> AlbumListWindow::get_thin_
     RECT client{};
     GetClientRect(m_wnd_tv, &client);
 
-    const int track_height = client.bottom - client.top;
+    // 兩條都出現時，垂直軸的軌道在右下角讓出一格給水平軸（垂直軸比較長，所以讓的是它；水平軸的右端不受影響，兩條的軌道不會重疊）
+    const auto strip_size = uih::scale_dpi_value(thin_strip_width);
+    const auto corner = vertical && is_thin_axis_scrollable(ThinAxis::horizontal) ? strip_size : 0;
 
-    if (track_height <= 0)
+    // 水平軸的軌道左右端對齊下方搜尋框圓角底的左右邊緣（使用者 11/08 晚上說滑塊拉到最右邊會比搜尋框多出一點，要求對齊它）；
+    // 沒有搜尋框時也留一樣的距離，兩種情況看起來一致。垂直軸不動
+    const int align = get_filter_horizontal_margin();
+    const int track_start = vertical ? client.top : client.left + align;
+    const int track_end = vertical ? client.bottom - corner : client.right - align;
+    const int track_length = track_end - track_start;
+
+    if (track_length <= 0)
         return std::nullopt;
 
     ThinScrollbarGeometry geometry{};
-    geometry.track_top = client.top;
-    geometry.track_height = track_height;
+    geometry.track_start = track_start;
+    geometry.track_length = track_length;
     geometry.range_min = info.nMin;
     geometry.position_range = static_cast<int>(total - static_cast<int64_t>(info.nPage));
 
-    const auto proportional_height = static_cast<int>(static_cast<int64_t>(track_height) * info.nPage / total);
-    geometry.thumb_height
-        = std::clamp(proportional_height, std::min(uih::scale_dpi_value(thin_thumb_min_height), track_height), track_height);
+    const auto proportional_length = static_cast<int>(static_cast<int64_t>(track_length) * info.nPage / total);
+    geometry.thumb_length
+        = std::clamp(proportional_length, std::min(uih::scale_dpi_value(thin_thumb_min_height), track_length), track_length);
 
     const auto position = std::clamp(info.nPos - info.nMin, 0, geometry.position_range);
-    const auto room = track_height - geometry.thumb_height;
+    const auto room = track_length - geometry.thumb_length;
     const auto offset = room > 0 ? static_cast<int>(static_cast<int64_t>(room) * position / geometry.position_range) : 0;
 
-    const auto width
-        = uih::scale_dpi_value(m_thin_near || m_thin_dragging ? thin_thumb_near_width : thin_thumb_rest_width);
-    const auto right = client.right - uih::scale_dpi_value(thin_thumb_right_inset);
+    const auto& state = thin_axis(axis);
+    const auto thickness
+        = uih::scale_dpi_value(state.pointer_near || state.dragging ? thin_thumb_near_width : thin_thumb_rest_width);
+    const auto inset = uih::scale_dpi_value(thin_thumb_right_inset);
 
-    geometry.thumb = {right - width, client.top + offset, right, client.top + offset + geometry.thumb_height};
-    geometry.strip = {client.right - uih::scale_dpi_value(thin_strip_width), client.top, client.right, client.bottom};
+    if (vertical) {
+        const auto right = client.right - inset;
+        geometry.thumb = {right - thickness, track_start + offset, right, track_start + offset + geometry.thumb_length};
+        geometry.strip = {client.right - strip_size, track_start, client.right, track_end};
+    } else {
+        const auto bottom = client.bottom - inset;
+        geometry.thumb = {track_start + offset, bottom - thickness, track_start + offset + geometry.thumb_length, bottom};
+        geometry.strip = {track_start, client.bottom - strip_size, track_end, client.bottom};
+    }
+
     return geometry;
 }
 
 void AlbumListWindow::destroy_thin_overlay()
 {
-    if (m_thin_overlay) {
-        DestroyWindow(m_thin_overlay);
-        m_thin_overlay = nullptr;
-    }
+    for (auto& state : m_thin_axes) {
+        if (state.overlay) {
+            DestroyWindow(state.overlay);
+            state.overlay = nullptr;
+        }
 
-    m_thin_overlay_shown = false;
-    m_thin_tracking_leave = false;
-    m_thin_track_holding = false;
+        state.overlay_shown = false;
+        state.tracking_leave = false;
+        state.track_holding = false;
+    }
+}
+
+void AlbumListWindow::update_thin_overlay()
+{
+    update_thin_overlay(ThinAxis::vertical);
+    update_thin_overlay(ThinAxis::horizontal);
 }
 
 // 依目前的捲動範圍、位置與滑鼠狀態更新浮層：沒有可捲的內容就藏起來；內容沒變就什麼都不做
-void AlbumListWindow::update_thin_overlay()
+void AlbumListWindow::update_thin_overlay(ThinAxis axis)
 {
     const auto panel = get_wnd();
 
     if (!panel || !m_wnd_tv)
         return;
 
-    const auto geometry = m_thin_active ? get_thin_scrollbar_geometry() : std::nullopt;
+    auto& axis_state = thin_axis(axis);
+    const auto geometry = m_thin_active ? get_thin_scrollbar_geometry(axis) : std::nullopt;
 
     if (!geometry) {
-        if (m_thin_overlay && m_thin_overlay_shown)
-            ShowWindow(m_thin_overlay, SW_HIDE);
+        if (axis_state.overlay && axis_state.overlay_shown)
+            ShowWindow(axis_state.overlay, SW_HIDE);
 
-        m_thin_overlay_shown = false;
+        axis_state.overlay_shown = false;
         return;
     }
 
@@ -296,24 +422,24 @@ void AlbumListWindow::update_thin_overlay()
         return;
 
     const auto colour = m_item_colours->get_colour(cui::colours::colour_text);
-    const BYTE alpha = m_thin_dragging || m_thin_thumb_hot ? thin_alpha_hot
-        : m_thin_near                                      ? thin_alpha_near
-                                                           : thin_alpha_rest;
+    const BYTE alpha = axis_state.dragging || axis_state.thumb_hot ? thin_alpha_hot
+        : axis_state.pointer_near                                          ? thin_alpha_near
+                                                                   : thin_alpha_rest;
 
     ThinOverlayState state{geometry->strip, geometry->thumb, colour, alpha};
 
-    if (m_thin_overlay && m_thin_overlay_shown && state == m_thin_overlay_state)
+    if (axis_state.overlay && axis_state.overlay_shown && state == axis_state.overlay_state)
         return;
 
-    if (!m_thin_overlay) {
-        m_thin_overlay = CreateWindowEx(WS_EX_LAYERED, thin_overlay_class_name, L"", WS_CHILD, 0, 0, 0, 0, panel,
+    if (!axis_state.overlay) {
+        axis_state.overlay = CreateWindowEx(WS_EX_LAYERED, thin_overlay_class_name, L"", WS_CHILD, 0, 0, 0, 0, panel,
             nullptr, core_api::get_my_instance(), nullptr);
 
-        if (!m_thin_overlay)
+        if (!axis_state.overlay)
             return;
 
-        SetWindowLongPtr(m_thin_overlay, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-        m_thin_overlay_shown = false;
+        SetWindowLongPtr(axis_state.overlay, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        axis_state.overlay_shown = false;
     }
 
     const auto width = state.strip.right - state.strip.left;
@@ -323,10 +449,10 @@ void AlbumListWindow::update_thin_overlay()
         return;
 
     // 位置或大小變了（或第一次顯示）才動視窗；放最上層，免得被樹（後建立的兄弟視窗）蓋住
-    if (!m_thin_overlay_shown || !EqualRect(&state.strip, &m_thin_overlay_state.strip)) {
+    if (!axis_state.overlay_shown || !EqualRect(&state.strip, &axis_state.overlay_state.strip)) {
         POINT origin{state.strip.left, state.strip.top};
         MapWindowPoints(m_wnd_tv, panel, &origin, 1);   // 樹的工作區座標 → 面板的工作區座標
-        SetWindowPos(m_thin_overlay, HWND_TOP, origin.x, origin.y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetWindowPos(axis_state.overlay, HWND_TOP, origin.x, origin.y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
 
     BITMAPINFO info{};
@@ -365,89 +491,121 @@ void AlbumListWindow::update_thin_overlay()
     blend.SourceConstantAlpha = 255;
     blend.AlphaFormat = AC_SRC_ALPHA;
 
-    if (UpdateLayeredWindow(m_thin_overlay, screen_dc.get(), nullptr, &size, memory_dc.get(), &source, 0, &blend, ULW_ALPHA)) {
-        m_thin_overlay_state = state;
-        m_thin_overlay_shown = true;
+    if (UpdateLayeredWindow(axis_state.overlay, screen_dc.get(), nullptr, &size, memory_dc.get(), &source, 0, &blend, ULW_ALPHA)) {
+        axis_state.overlay_state = state;
+        axis_state.overlay_shown = true;
     }
 }
 
-void AlbumListWindow::update_thin_scrollbar_hover(POINT pt)
+void AlbumListWindow::update_thin_scrollbar_hover(ThinAxis axis, POINT pt)
 {
-    const auto geometry = get_thin_scrollbar_geometry();
+    const auto geometry = get_thin_scrollbar_geometry(axis);
 
     if (!geometry)
         return;
 
-    // 滑塊的「熱區」用靠近時的寬度算，y 在滑塊範圍內就算（不用精準點到 4 px 細條）
-    const bool on_thumb = pt.y >= geometry->thumb.top && pt.y < geometry->thumb.bottom
-        && pt.x >= geometry->strip.right - uih::scale_dpi_value(thin_thumb_right_inset + thin_thumb_near_width);
+    auto& state = thin_axis(axis);
+    const auto vertical = axis == ThinAxis::vertical;
 
-    if (!m_thin_tracking_leave && m_thin_overlay) {
-        TRACKMOUSEEVENT track_mouse_event{sizeof(TRACKMOUSEEVENT), TME_LEAVE, m_thin_overlay, 0};
-        m_thin_tracking_leave = TrackMouseEvent(&track_mouse_event) != 0;
+    const auto along = vertical ? pt.y : pt.x;
+    const auto across = vertical ? pt.x : pt.y;
+    const auto thumb_start = vertical ? geometry->thumb.top : geometry->thumb.left;
+    const auto thumb_end = vertical ? geometry->thumb.bottom : geometry->thumb.right;
+    const auto strip_end = vertical ? geometry->strip.right : geometry->strip.bottom;
+
+    // 滑塊的「熱區」用靠近時的厚度算，沿捲動方向在滑塊範圍內就算（不用精準點到 4 px 細條）
+    const bool on_thumb = along >= thumb_start && along < thumb_end
+        && across >= strip_end - uih::scale_dpi_value(thin_thumb_right_inset + thin_thumb_near_width);
+
+    if (!state.tracking_leave && state.overlay) {
+        TRACKMOUSEEVENT track_mouse_event{sizeof(TRACKMOUSEEVENT), TME_LEAVE, state.overlay, 0};
+        state.tracking_leave = TrackMouseEvent(&track_mouse_event) != 0;
     }
 
-    if (m_thin_near && on_thumb == m_thin_thumb_hot)
+    if (state.pointer_near && on_thumb == state.thumb_hot)
         return;
 
-    m_thin_near = true;
-    m_thin_thumb_hot = on_thumb;
-    update_thin_overlay();
+    state.pointer_near = true;
+    state.thumb_hot = on_thumb;
+    update_thin_overlay(axis);
 }
 
-void AlbumListWindow::drag_thin_scrollbar_to(int mouse_y)
+void AlbumListWindow::drag_thin_scrollbar_to(ThinAxis axis, POINT pt)
 {
-    const auto geometry = get_thin_scrollbar_geometry();
+    const auto geometry = get_thin_scrollbar_geometry(axis);
 
     if (!geometry)
         return;
 
-    const auto room = geometry->track_height - geometry->thumb_height;
+    const auto vertical = axis == ThinAxis::vertical;
+    const auto room = geometry->track_length - geometry->thumb_length;
 
     if (room <= 0)
         return;
 
-    const auto wanted_top = std::clamp(mouse_y - m_thin_drag_grab - geometry->track_top, 0, room);
-    const auto row = geometry->range_min
-        + static_cast<int>(std::llround(static_cast<double>(wanted_top) * static_cast<double>(geometry->position_range)
+    const int along = vertical ? pt.y : pt.x;
+    const auto wanted_start = std::clamp(along - thin_axis(axis).drag_grab - geometry->track_start, 0, room);
+    const auto position = geometry->range_min
+        + static_cast<int>(std::llround(static_cast<double>(wanted_start) * static_cast<double>(geometry->position_range)
               / static_cast<double>(room)));
 
-    // 合成的 WM_VSCROLL(SB_THUMBTRACK) 樹不理（它去讀原生捲軸自己的追蹤位置，實測拖了不會捲），
-    // 所以改成：從目前第一個可見項目往上或往下走到目標那一列，再把它設成第一個可見項目（只捲動、不改選取）
     SCROLLINFO info{};
     info.cbSize = sizeof(info);
     info.fMask = SIF_POS;
 
-    if (!GetScrollInfo(m_wnd_tv, SB_VERT, &info))
+    if (!GetScrollInfo(m_wnd_tv, vertical ? SB_VERT : SB_HORZ, &info))
         return;
 
-    if (row == info.nPos)
+    if (position == info.nPos)
         return;
 
-    auto item = TreeView_GetFirstVisible(m_wnd_tv);
-    auto steps = row - info.nPos;
-    const auto direction = steps > 0 ? TVGN_NEXTVISIBLE : TVGN_PREVIOUSVISIBLE;
-    steps = std::abs(steps);
+    if (vertical) {
+        // 合成的 WM_VSCROLL(SB_THUMBTRACK) 樹不理（它去讀原生捲軸自己的追蹤位置，實測拖了不會捲），
+        // 所以改成：從目前第一個可見項目往上或往下走到目標那一列，再把它設成第一個可見項目（只捲動、不改選取）
+        auto item = TreeView_GetFirstVisible(m_wnd_tv);
+        auto steps = position - info.nPos;
+        const auto direction = steps > 0 ? TVGN_NEXTVISIBLE : TVGN_PREVIOUSVISIBLE;
+        steps = std::abs(steps);
 
-    for (; steps > 0 && item; --steps) {
-        const auto next = TreeView_GetNextItem(m_wnd_tv, item, direction);
+        for (; steps > 0 && item; --steps) {
+            const auto next = TreeView_GetNextItem(m_wnd_tv, item, direction);
 
-        if (!next)
-            break;
+            if (!next)
+                break;
 
-        item = next;
+            item = next;
+        }
+
+        if (item) {
+            // 設定第一個可見項目時，樹會順便改掉水平捲動位置（實測拖垂直滑塊，內容會左右跳），原生垂直捲軸不會這樣，所以事後還原
+            SCROLLINFO horizontal{};
+            horizontal.cbSize = sizeof(horizontal);
+            horizontal.fMask = SIF_POS;
+            const auto had_horizontal = GetScrollInfo(m_wnd_tv, SB_HORZ, &horizontal);
+
+            TreeView_SelectSetFirstVisible(m_wnd_tv, item);
+
+            SCROLLINFO after{};
+            after.cbSize = sizeof(after);
+            after.fMask = SIF_POS;
+
+            if (had_horizontal && GetScrollInfo(m_wnd_tv, SB_HORZ, &after) && after.nPos != horizontal.nPos)
+                SendMessage(m_wnd_tv, WM_HSCROLL,
+                    MAKEWPARAM(SB_THUMBTRACK, std::clamp(horizontal.nPos, 0, thin_max_scroll_message_position)), 0);
+        }
+    } else {
+        // 水平軸的單位是像素；實測（獨立的 TreeView）WM_HSCROLL(SB_THUMBTRACK, 位置) 會直接跳到那個像素位置，不用像垂直那樣繞路
+        SendMessage(m_wnd_tv, WM_HSCROLL,
+            MAKEWPARAM(SB_THUMBTRACK, std::clamp(position, 0, thin_max_scroll_message_position)), 0);
     }
 
-    if (item)
-        TreeView_SelectSetFirstVisible(m_wnd_tv, item);
-
-    update_thin_overlay();
+    update_thin_overlay(axis);
 }
 
-// 計時器每次響：游標還在軌道上、而且在滑塊上方或下方，就再翻一頁；滑塊追到游標底下就先不翻（游標移開滑塊又會繼續）
-void AlbumListWindow::repeat_thin_track_page()
+// 計時器每次響：游標還在軌道上、而且在滑塊前面或後面，就再翻一頁；滑塊追到游標底下就先不翻（游標移開滑塊又會繼續）
+void AlbumListWindow::repeat_thin_track_page(ThinAxis axis)
 {
-    const auto geometry = get_thin_scrollbar_geometry();
+    const auto geometry = get_thin_scrollbar_geometry(axis);
 
     if (!geometry || !m_wnd_tv)
         return;
@@ -459,39 +617,49 @@ void AlbumListWindow::repeat_thin_track_page()
     if (!PtInRect(&geometry->strip, pt))
         return;
 
-    if (pt.y < geometry->thumb.top)
-        SendMessage(m_wnd_tv, WM_VSCROLL, MAKEWPARAM(SB_PAGEUP, 0), 0);
-    else if (pt.y >= geometry->thumb.bottom)
-        SendMessage(m_wnd_tv, WM_VSCROLL, MAKEWPARAM(SB_PAGEDOWN, 0), 0);
+    const auto vertical = axis == ThinAxis::vertical;
+    const auto along = vertical ? pt.y : pt.x;
+    const auto thumb_start = vertical ? geometry->thumb.top : geometry->thumb.left;
+    const auto thumb_end = vertical ? geometry->thumb.bottom : geometry->thumb.right;
+    const auto message = vertical ? WM_VSCROLL : WM_HSCROLL;
 
-    update_thin_overlay();
+    if (along < thumb_start)
+        SendMessage(m_wnd_tv, message, MAKEWPARAM(vertical ? SB_PAGEUP : SB_PAGELEFT, 0), 0);
+    else if (along >= thumb_end)
+        SendMessage(m_wnd_tv, message, MAKEWPARAM(vertical ? SB_PAGEDOWN : SB_PAGERIGHT, 0), 0);
+
+    update_thin_overlay(axis);
 }
 
-void AlbumListWindow::end_thin_track_hold()
+void AlbumListWindow::end_thin_track_hold(ThinAxis axis)
 {
-    if (!m_thin_track_holding)
+    auto& state = thin_axis(axis);
+
+    if (!state.track_holding)
         return;
 
-    m_thin_track_holding = false;
+    state.track_holding = false;
 
-    if (m_thin_overlay) {
-        KillTimer(m_thin_overlay, thin_repeat_timer_id);
+    if (state.overlay) {
+        KillTimer(state.overlay, thin_repeat_timer_id);
 
-        if (GetCapture() == m_thin_overlay)
+        if (GetCapture() == state.overlay)
             ReleaseCapture();
     }
 
-    update_thin_overlay();
+    update_thin_overlay(axis);
 }
 
-void AlbumListWindow::end_thin_scrollbar_drag(bool release_capture)
+void AlbumListWindow::end_thin_scrollbar_drag(ThinAxis axis, bool release_capture)
 {
-    if (!m_thin_dragging)
+    auto& state = thin_axis(axis);
+
+    if (!state.dragging)
         return;
 
-    m_thin_dragging = false;
+    state.dragging = false;
 
-    if (release_capture && m_thin_overlay && GetCapture() == m_thin_overlay)
+    if (release_capture && state.overlay && GetCapture() == state.overlay)
         ReleaseCapture();
 
     // 放開後依游標目前的位置決定要不要維持「靠近」的樣子
@@ -499,25 +667,30 @@ void AlbumListWindow::end_thin_scrollbar_drag(bool release_capture)
     GetCursorPos(&pt);
 
     RECT overlay_rect{};
-    const auto over_overlay = m_thin_overlay && m_thin_overlay_shown && GetWindowRect(m_thin_overlay, &overlay_rect)
+    const auto over_overlay = state.overlay && state.overlay_shown && GetWindowRect(state.overlay, &overlay_rect)
         && PtInRect(&overlay_rect, pt);
 
-    m_thin_near = false;
-    m_thin_thumb_hot = false;
+    state.pointer_near = false;
+    state.thumb_hot = false;
 
     if (over_overlay && m_wnd_tv) {
         ScreenToClient(m_wnd_tv, &pt);
-        update_thin_scrollbar_hover(pt);
+        update_thin_scrollbar_hover(axis, pt);
     }
 
-    update_thin_overlay();
+    update_thin_overlay(axis);
 }
 
 LRESULT AlbumListWindow::on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    // 這個浮層是垂直的還是水平的
+    const auto axis = wnd == thin_axis(ThinAxis::horizontal).overlay ? ThinAxis::horizontal : ThinAxis::vertical;
+    const auto vertical = axis == ThinAxis::vertical;
+    auto& state = thin_axis(axis);
+
     // 浮層的座標換成樹視窗工作區的座標
-    const auto to_tree = [this](LPARAM l) {
-        return POINT{GET_X_LPARAM(l) + m_thin_overlay_state.strip.left, GET_Y_LPARAM(l) + m_thin_overlay_state.strip.top};
+    const auto to_tree = [&state](LPARAM l) {
+        return POINT{GET_X_LPARAM(l) + state.overlay_state.strip.left, GET_Y_LPARAM(l) + state.overlay_state.strip.top};
     };
 
     switch (msg) {
@@ -529,66 +702,72 @@ LRESULT AlbumListWindow::on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, 
     case WM_MOUSEMOVE: {
         const auto pt = to_tree(lp);
 
-        if (m_thin_dragging) {
-            drag_thin_scrollbar_to(pt.y);
+        if (state.dragging) {
+            drag_thin_scrollbar_to(axis, pt);
             return 0;
         }
 
-        update_thin_scrollbar_hover(pt);
+        update_thin_scrollbar_hover(axis, pt);
         return 0;
     }
     case WM_MOUSELEAVE:
-        m_thin_tracking_leave = false;
+        state.tracking_leave = false;
 
-        if (!m_thin_dragging && (m_thin_near || m_thin_thumb_hot)) {
-            m_thin_near = false;
-            m_thin_thumb_hot = false;
-            update_thin_overlay();
+        if (!state.dragging && (state.pointer_near || state.thumb_hot)) {
+            state.pointer_near = false;
+            state.thumb_hot = false;
+            update_thin_overlay(axis);
         }
 
         return 0;
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK: {
         const auto pt = to_tree(lp);
-        const auto geometry = get_thin_scrollbar_geometry();
+        const auto geometry = get_thin_scrollbar_geometry(axis);
 
         if (!geometry || !m_wnd_tv)
             return 0;
 
-        // 右邊緣這條是滑軌：不選取底下的項目、不開始拖放，也不搶焦點（跟原生滑軌一樣）
-        m_thin_near = true;
+        const auto along = vertical ? pt.y : pt.x;
+        const auto thumb_start = vertical ? geometry->thumb.top : geometry->thumb.left;
+        const auto thumb_end = vertical ? geometry->thumb.bottom : geometry->thumb.right;
 
-        if (pt.y >= geometry->thumb.top && pt.y < geometry->thumb.bottom) {
-            m_thin_dragging = true;
-            m_thin_drag_grab = pt.y - geometry->thumb.top;
+        // 這條邊緣是滑軌：不選取底下的項目、不開始拖放，也不搶焦點（跟原生滑軌一樣）
+        state.pointer_near = true;
+
+        if (along >= thumb_start && along < thumb_end) {
+            state.dragging = true;
+            state.drag_grab = along - thumb_start;
             SetCapture(wnd);
         } else {
             // 軌道空白處：先翻一頁，按住不放就連續翻（見 repeat_thin_track_page）
-            SendMessage(m_wnd_tv, WM_VSCROLL, MAKEWPARAM(pt.y < geometry->thumb.top ? SB_PAGEUP : SB_PAGEDOWN, 0), 0);
-            m_thin_track_holding = true;
+            const auto before = along < thumb_start;
+            SendMessage(m_wnd_tv, vertical ? WM_VSCROLL : WM_HSCROLL,
+                MAKEWPARAM(vertical ? (before ? SB_PAGEUP : SB_PAGEDOWN) : (before ? SB_PAGELEFT : SB_PAGERIGHT), 0), 0);
+            state.track_holding = true;
             SetCapture(wnd);
             SetTimer(wnd, thin_repeat_timer_id, thin_repeat_first_delay_ms, nullptr);
         }
 
-        update_thin_overlay();
+        update_thin_overlay(axis);
         return 0;
     }
     case WM_TIMER:
-        if (wp == thin_repeat_timer_id && m_thin_track_holding) {
+        if (wp == thin_repeat_timer_id && state.track_holding) {
             SetTimer(wnd, thin_repeat_timer_id, thin_repeat_interval_ms, nullptr);
-            repeat_thin_track_page();
+            repeat_thin_track_page(axis);
             return 0;
         }
 
         return DefWindowProc(wnd, msg, wp, lp);
     case WM_LBUTTONUP:
-        end_thin_scrollbar_drag(true);
-        end_thin_track_hold();
+        end_thin_scrollbar_drag(axis, true);
+        end_thin_track_hold(axis);
         return 0;
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
-        end_thin_scrollbar_drag(false);
-        end_thin_track_hold();
+        end_thin_scrollbar_drag(axis, false);
+        end_thin_track_hold(axis);
         return 0;
     default:
         return DefWindowProc(wnd, msg, wp, lp);
