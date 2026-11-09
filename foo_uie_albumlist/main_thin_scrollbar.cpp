@@ -38,6 +38,11 @@ constexpr UINT_PTR thin_repeat_timer_id = 1;
 constexpr UINT thin_repeat_first_delay_ms = 400;
 constexpr UINT thin_repeat_interval_ms = 50;
 
+// 滑鼠離開後淡出（2026-11-09 使用者：移開時直接消失太突然）：300 ms、頭尾放慢（smoothstep），約每 16 ms 重畫一次
+constexpr UINT_PTR thin_fade_timer_id = 2;
+constexpr ULONGLONG thin_fade_ms = 300;
+constexpr UINT thin_fade_tick_ms = 16;
+
 // WM_HSCROLL(SB_THUMBTRACK) 的位置只有 16 位元
 constexpr int thin_max_scroll_message_position = 0x7FFF;
 
@@ -205,6 +210,9 @@ void AlbumListWindow::apply_thin_scrollbar()
         state.thumb_hot = false;
     }
 
+    stop_thin_fade(ThinAxis::vertical);
+    stop_thin_fade(ThinAxis::horizontal);
+
     // 關掉就把浮層拿掉；開啟（含重建樹之後）要重新放到最上層，免得被新建的樹蓋住
     if (!wanted) {
         destroy_thin_overlay();
@@ -232,6 +240,7 @@ void AlbumListWindow::clear_thin_state()
         state.pointer_near = false;
         state.thumb_hot = false;
         state.dragging = false;
+        state.fading = false;
     }
 
     destroy_thin_overlay();
@@ -384,7 +393,7 @@ std::optional<AlbumListWindow::ThinScrollbarGeometry> AlbumListWindow::get_thin_
 
     const auto& state = thin_axis(axis);
     const auto thickness
-        = uih::scale_dpi_value(state.pointer_near || state.dragging ? thin_thumb_near_width : thin_thumb_rest_width);
+        = uih::scale_dpi_value(state.pointer_near || state.dragging || state.fading ? thin_thumb_near_width : thin_thumb_rest_width);
     const auto inset = uih::scale_dpi_value(thin_thumb_right_inset);
 
     if (vertical) {
@@ -429,9 +438,16 @@ void AlbumListWindow::update_thin_overlay(ThinAxis axis)
         return;
 
     auto& axis_state = thin_axis(axis);
+
+    // 淡出時間到了就先結束（要在算位置之前：結束後滑塊回到平常的粗細）
+    if (axis_state.fading && GetTickCount64() - axis_state.fade_start >= thin_fade_ms)
+        stop_thin_fade(axis);
+
     const auto geometry = m_thin_active ? get_thin_scrollbar_geometry(axis) : std::nullopt;
 
     if (!geometry) {
+        stop_thin_fade(axis);
+
         if (axis_state.overlay && axis_state.overlay_shown)
             ShowWindow(axis_state.overlay, SW_HIDE);
 
@@ -445,10 +461,17 @@ void AlbumListWindow::update_thin_overlay(ThinAxis axis)
         return;
 
     const auto colour = m_item_colours->get_colour(cui::colours::colour_text);
-    const BYTE alpha = axis_state.dragging || axis_state.thumb_hot ? thin_alpha_hot
-        : axis_state.pointer_near                                          ? thin_alpha_near
-        : (axis == ThinAxis::vertical ? s_thin_autohide_vertical : s_thin_autohide_horizontal) ? thin_alpha_hidden
-                                                                   : thin_alpha_rest;
+    BYTE alpha = thin_rest_alpha(axis);
+
+    if (axis_state.dragging || axis_state.thumb_hot || axis_state.pointer_near) {
+        // 滑鼠又回來了：淡出中就立刻停掉
+        stop_thin_fade(axis);
+        alpha = axis_state.dragging || axis_state.thumb_hot ? thin_alpha_hot : thin_alpha_near;
+    } else if (axis_state.fading) {
+        const auto t = static_cast<double>(GetTickCount64() - axis_state.fade_start) / static_cast<double>(thin_fade_ms);
+        const auto eased = t * t * (3.0 - 2.0 * t);
+        alpha = static_cast<BYTE>(std::lround(axis_state.fade_from + (alpha - axis_state.fade_from) * eased));
+    }
 
     ThinOverlayState state{geometry->strip, geometry->thumb, colour, alpha};
 
@@ -519,6 +542,40 @@ void AlbumListWindow::update_thin_overlay(ThinAxis axis)
         axis_state.overlay_state = state;
         axis_state.overlay_shown = true;
     }
+}
+
+// 平常（滑鼠不在旁邊）的不透明度：設成自動隱藏的那條是 0
+BYTE AlbumListWindow::thin_rest_alpha(ThinAxis axis) const
+{
+    const auto hidden = axis == ThinAxis::vertical ? s_thin_autohide_vertical : s_thin_autohide_horizontal;
+    return hidden ? thin_alpha_hidden : thin_alpha_rest;
+}
+
+// 從目前畫著的不透明度開始淡出到平常的值；本來就不比平常亮（或浮層沒顯示）就不用淡
+void AlbumListWindow::start_thin_fade(ThinAxis axis)
+{
+    auto& state = thin_axis(axis);
+
+    if (!state.overlay || !state.overlay_shown || state.overlay_state.alpha <= thin_rest_alpha(axis))
+        return;
+
+    state.fading = true;
+    state.fade_from = state.overlay_state.alpha;
+    state.fade_start = GetTickCount64();
+    SetTimer(state.overlay, thin_fade_timer_id, thin_fade_tick_ms, nullptr);
+}
+
+void AlbumListWindow::stop_thin_fade(ThinAxis axis)
+{
+    auto& state = thin_axis(axis);
+
+    if (!state.fading)
+        return;
+
+    state.fading = false;
+
+    if (state.overlay)
+        KillTimer(state.overlay, thin_fade_timer_id);
 }
 
 void AlbumListWindow::update_thin_scrollbar_hover(ThinAxis axis, POINT pt)
@@ -701,6 +758,10 @@ void AlbumListWindow::end_thin_scrollbar_drag(ThinAxis axis, bool release_captur
     const auto over_overlay = state.overlay && state.overlay_shown && GetWindowRect(state.overlay, &overlay_rect)
         && PtInRect(&overlay_rect, pt);
 
+    // 放開時游標已經在滑軌外面：淡出（不是直接消失）
+    if (!over_overlay)
+        start_thin_fade(axis);
+
     state.pointer_near = false;
     state.thumb_hot = false;
 
@@ -745,6 +806,7 @@ LRESULT AlbumListWindow::on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, 
         state.tracking_leave = false;
 
         if (!state.dragging && (state.pointer_near || state.thumb_hot)) {
+            start_thin_fade(axis);
             state.pointer_near = false;
             state.thumb_hot = false;
             update_thin_overlay(axis);
@@ -784,6 +846,11 @@ LRESULT AlbumListWindow::on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, 
         return 0;
     }
     case WM_TIMER:
+        if (wp == thin_fade_timer_id) {
+            update_thin_overlay(axis);
+            return 0;
+        }
+
         if (wp == thin_repeat_timer_id && state.track_holding) {
             SetTimer(wnd, thin_repeat_timer_id, thin_repeat_interval_ms, nullptr);
             repeat_thin_track_page(axis);

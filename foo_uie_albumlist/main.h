@@ -217,6 +217,10 @@ private:
         // 按住軌道空白處時連續翻頁（原生滑軌的行為）
         bool track_holding{};
         int drag_grab{};
+        // 滑鼠離開後淡出（2026-11-09）：從離開當下的不透明度在 thin_fade_ms 內降到平常的值；淡出中滑塊維持靠近時的粗細
+        bool fading{};
+        BYTE fade_from{};
+        ULONGLONG fade_start{};
         HWND overlay{};
         bool overlay_shown{};
         ThinOverlayState overlay_state{};
@@ -244,6 +248,9 @@ private:
     LRESULT on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp);
     void update_thin_overlay();
     void update_thin_overlay(ThinAxis axis);
+    BYTE thin_rest_alpha(ThinAxis axis) const;
+    void start_thin_fade(ThinAxis axis);
+    void stop_thin_fade(ThinAxis axis);
     void destroy_thin_overlay();
     void repeat_thin_track_page(ThinAxis axis);
     void end_thin_track_hold(ThinAxis axis);
