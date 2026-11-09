@@ -577,11 +577,15 @@ void AlbumListWindow::drag_thin_scrollbar_to(ThinAxis axis, POINT pt)
         }
 
         if (item) {
-            // 設定第一個可見項目時，樹會順便改掉水平捲動位置（實測拖垂直滑塊，內容會左右跳），原生垂直捲軸不會這樣，所以事後還原
+            // 設定第一個可見項目時，樹會順便改掉水平捲動位置（實測拖垂直滑塊，內容會左右跳），原生垂直捲軸不會這樣，所以事後還原。
+            // 「設定」與「還原」之間樹只要畫出來，水平被推走的過渡畫面就會被螢幕顯示（大幅拖曳時肉眼可見的殘影：
+            // 內容左右跳、列被切成一條條），所以這段期間暫停重繪，兩步都做完再一次性重畫成最終畫面
             SCROLLINFO horizontal{};
             horizontal.cbSize = sizeof(horizontal);
             horizontal.fMask = SIF_POS;
             const auto had_horizontal = GetScrollInfo(m_wnd_tv, SB_HORZ, &horizontal);
+
+            SendMessage(m_wnd_tv, WM_SETREDRAW, FALSE, 0);
 
             TreeView_SelectSetFirstVisible(m_wnd_tv, item);
 
@@ -592,6 +596,9 @@ void AlbumListWindow::drag_thin_scrollbar_to(ThinAxis axis, POINT pt)
             if (had_horizontal && GetScrollInfo(m_wnd_tv, SB_HORZ, &after) && after.nPos != horizontal.nPos)
                 SendMessage(m_wnd_tv, WM_HSCROLL,
                     MAKEWPARAM(SB_THUMBTRACK, std::clamp(horizontal.nPos, 0, thin_max_scroll_message_position)), 0);
+
+            SendMessage(m_wnd_tv, WM_SETREDRAW, TRUE, 0);
+            RedrawWindow(m_wnd_tv, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
         }
     } else {
         // 水平軸的單位是像素；實測（獨立的 TreeView）WM_HSCROLL(SB_THUMBTRACK, 位置) 會直接跳到那個像素位置，不用像垂直那樣繞路
