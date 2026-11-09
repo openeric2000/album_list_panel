@@ -469,7 +469,8 @@ void AlbumListWindow::on_size(unsigned cx, unsigned cy)
     const auto extra_height = get_thin_extra_height();
 
     HDWP dwp = BeginDeferWindowPos(2);
-    dwp = DeferWindowPos(dwp, m_wnd_tv, nullptr, 0, 0, tv_width + extra_width, tv_height + extra_height, SWP_NOZORDER);
+    dwp = DeferWindowPos(
+        dwp, m_wnd_tv, nullptr, 0, strip_height, tv_width + extra_width, tv_height + extra_height, SWP_NOZORDER);
     if (m_wnd_edit)
         dwp = DeferWindowPos(dwp, m_wnd_edit, nullptr, layout.edit.left, layout.edit.top,
             layout.edit.right - layout.edit.left, layout.edit.bottom - layout.edit.top, SWP_NOZORDER);
@@ -526,7 +527,8 @@ AlbumListWindow::FilterLayout AlbumListWindow::get_filter_layout(int cx, int cy)
     if (strip_height >= cy)
         return layout;
 
-    layout.strip = {0, cy - strip_height, cx, cy};
+    // Nocturne：搜尋框那一列放在面板頂端（2026-11-09 使用者要求，原本在底部），樹狀清單接在它下面
+    layout.strip = {0, 0, cx, strip_height};
 
     layout.pill.left = px(filter_margin_x);
     layout.pill.right = std::max<int>(layout.pill.left, cx - px(filter_margin_x));

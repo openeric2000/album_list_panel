@@ -367,7 +367,7 @@ std::optional<AlbumListWindow::ThinScrollbarGeometry> AlbumListWindow::get_thin_
     const auto strip_size = uih::scale_dpi_value(thin_strip_width);
     const auto corner = vertical && is_thin_axis_scrollable(ThinAxis::horizontal) ? strip_size : 0;
 
-    // 水平軸的軌道左右端對齊下方搜尋框圓角底的左右邊緣（使用者 11/08 晚上說滑塊拉到最右邊會比搜尋框多出一點，要求對齊它）；
+    // 水平軸的軌道左右端對齊搜尋框圓角底的左右邊緣（搜尋框 11/09 起移到樹的上方）（使用者 11/08 晚上說滑塊拉到最右邊會比搜尋框多出一點，要求對齊它）；
     // 沒有搜尋框時也留一樣的距離，兩種情況看起來一致。垂直軸不動
     const int align = get_filter_horizontal_margin();
     const int track_start = vertical ? client.top : client.left + align;
