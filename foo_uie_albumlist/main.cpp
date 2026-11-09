@@ -47,6 +47,10 @@ constexpr int filter_icon_left_padding = 11;
 constexpr int filter_icon_gap = 8;
 constexpr int filter_clear_width = 26;
 constexpr int filter_clear_right_padding = 4;
+// 搜尋框位置的共用設定（Columns UI 設定頁 tab_next_track_toast.cpp 有同樣的鍵名、預設值，兩邊要一致）；
+// 預設 false＝下方（2026-11-09 使用者先要上方、加開關後改回預設下方）
+constexpr char filter_on_top_config_key[] = "nocturne.folderTree.searchOnTop";
+constexpr bool filter_on_top_default = false;
 constexpr int filter_fill_same_tolerance = 6;     // 各色版差距在這之內就視為「跟背景一樣」
 constexpr double filter_fill_lift_amount = 0.055; // 調亮（深色）／調暗（淺色）的幅度
 
@@ -469,8 +473,10 @@ void AlbumListWindow::on_size(unsigned cx, unsigned cy)
     const auto extra_height = get_thin_extra_height();
 
     HDWP dwp = BeginDeferWindowPos(2);
+    // 搜尋框在上方時樹從它下面開始；在下方（或沒有搜尋框）時從面板頂端開始
+    const auto tv_top = s_filter_on_top ? strip_height : 0;
     dwp = DeferWindowPos(
-        dwp, m_wnd_tv, nullptr, 0, strip_height, tv_width + extra_width, tv_height + extra_height, SWP_NOZORDER);
+        dwp, m_wnd_tv, nullptr, 0, tv_top, tv_width + extra_width, tv_height + extra_height, SWP_NOZORDER);
     if (m_wnd_edit)
         dwp = DeferWindowPos(dwp, m_wnd_edit, nullptr, layout.edit.left, layout.edit.top,
             layout.edit.right - layout.edit.left, layout.edit.bottom - layout.edit.top, SWP_NOZORDER);
@@ -527,8 +533,8 @@ AlbumListWindow::FilterLayout AlbumListWindow::get_filter_layout(int cx, int cy)
     if (strip_height >= cy)
         return layout;
 
-    // Nocturne：搜尋框那一列放在面板頂端（2026-11-09 使用者要求，原本在底部），樹狀清單接在它下面
-    layout.strip = {0, 0, cx, strip_height};
+    // Nocturne：搜尋框那一列預設在面板底部；設定頁可改成頂端（樹狀清單接在它下面，2026-11-09）
+    layout.strip = s_filter_on_top ? RECT{0, 0, cx, strip_height} : RECT{0, cy - strip_height, cx, cy};
 
     layout.pill.left = px(filter_margin_x);
     layout.pill.right = std::max<int>(layout.pill.left, cx - px(filter_margin_x));
@@ -553,6 +559,44 @@ AlbumListWindow::FilterLayout AlbumListWindow::get_filter_layout(int cx, int cy)
     layout.edit.bottom = layout.edit.top + font_height;
 
     return layout;
+}
+
+// 讀共用設定並（第一次呼叫時）登記變更通知：Columns UI 設定頁改了搜尋框位置，所有面板當場重排
+void AlbumListWindow::s_sync_filter_position_setting()
+{
+    static bool notify_registered = false;
+
+    if (!notify_registered) {
+        notify_registered = true;
+        fb2k::configStore::get()->addPermanentNotify(filter_on_top_config_key, [] {
+            fb2k::inMainThread([] {
+                const auto on_top
+                    = fb2k::configStore::get()->getConfigBool(filter_on_top_config_key, filter_on_top_default);
+
+                if (on_top == s_filter_on_top)
+                    return;
+
+                s_filter_on_top = on_top;
+
+                for (size_t i{}; i < s_instances.get_count(); ++i) {
+                    const auto instance = s_instances[i];
+                    if (!instance->get_wnd())
+                        continue;
+
+                    // 搜尋框換位置：先把整個面板標成要重畫（舊位置那一列由樹蓋過去、新位置那一列由 on_size 標記），再重排。
+                    // 樹只是整個上下移動、大小沒變，細捲軸浮層用「相對於樹」的座標比對會以為沒變而不移動
+                    // （2026-11-09 實測切到下方時滑軌停在原位），所以先標成「還沒顯示過」，強制重新定位
+                    InvalidateRect(instance->get_wnd(), nullptr, FALSE);
+                    instance->on_size();
+                    instance->thin_axis(ThinAxis::vertical).overlay_shown = false;
+                    instance->thin_axis(ThinAxis::horizontal).overlay_shown = false;
+                    instance->update_thin_overlay();
+                }
+            });
+        });
+    }
+
+    s_filter_on_top = fb2k::configStore::get()->getConfigBool(filter_on_top_config_key, filter_on_top_default);
 }
 
 int AlbumListWindow::get_filter_horizontal_margin() const
@@ -819,6 +863,8 @@ void AlbumListWindow::create_tree()
 
         // Nocturne 細捲軸：讀共用開關（第一次也會登記變更通知），依開關決定這棵樹用哪種捲軸
         s_sync_thin_scrollbar_setting();
+        // 搜尋框位置也是共用設定；要在下面第一次排版（apply_thin_scrollbar 會呼叫 on_size）之前讀好
+        s_sync_filter_position_setting();
         apply_thin_scrollbar();
 
         if (m_populated) {

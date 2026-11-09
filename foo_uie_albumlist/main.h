@@ -136,6 +136,9 @@ private:
     // 否則圓角底會融進背景看不出來
     static COLORREF get_filter_fill_colour(COLORREF configured_fill, COLORREF strip_background);
     FilterLayout get_filter_layout(int cx, int cy) const;
+    // 搜尋框放在樹的上方還是下方（2026-11-09）：存在 fb2k 共用設定，Columns UI 設定頁「介面」分頁改了當場重排
+    static inline bool s_filter_on_top{false};
+    static void s_sync_filter_position_setting();
     // 搜尋框圓角底離面板左右邊緣的距離（實際像素）；水平細捲軸的軌道左右端對齊它（見 main_thin_scrollbar.cpp）
     int get_filter_horizontal_margin() const;
     FilterLayout get_filter_layout() const;
