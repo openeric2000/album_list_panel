@@ -22,10 +22,9 @@ constexpr int thin_thumb_rest_width = 4;
 constexpr int thin_thumb_near_width = 10;
 constexpr int thin_thumb_min_height = 36;
 
-// 不透明度（0～255）：平常 .24、靠近 .42、滑到滑塊上或拖曳中 .62
-constexpr BYTE thin_alpha_rest = 61;
-// 水平軸平常完全看不見，滑鼠移進軌道才出現（2026-11-09 使用者：橫的那條會擋到底下最後一列的資料夾名稱；直的那條維持原樣）
-constexpr BYTE thin_alpha_rest_horizontal = 0;
+// 不透明度（0～255）：平常完全看不見、靠近 .42、滑到滑塊上或拖曳中 .62
+// 平常原本是 .24；2026-11-09 使用者先要水平那條（會擋到最下面一列的資料夾名稱）改成滑鼠移進軌道才出現，看過後垂直也一起改
+constexpr BYTE thin_alpha_rest = 0;
 constexpr BYTE thin_alpha_near = 107;
 constexpr BYTE thin_alpha_hot = 158;
 
@@ -426,7 +425,6 @@ void AlbumListWindow::update_thin_overlay(ThinAxis axis)
     const auto colour = m_item_colours->get_colour(cui::colours::colour_text);
     const BYTE alpha = axis_state.dragging || axis_state.thumb_hot ? thin_alpha_hot
         : axis_state.pointer_near                                          ? thin_alpha_near
-        : axis == ThinAxis::horizontal                                     ? thin_alpha_rest_horizontal
                                                                    : thin_alpha_rest;
 
     ThinOverlayState state{geometry->strip, geometry->thumb, colour, alpha};
