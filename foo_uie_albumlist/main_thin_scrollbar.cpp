@@ -858,6 +858,13 @@ LRESULT AlbumListWindow::on_thin_overlay_message(HWND wnd, UINT msg, WPARAM wp, 
         }
 
         return DefWindowProc(wnd, msg, wp, lp);
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+        // 滑鼠停在細滑軌上時，滾輪會送到這個浮層；浮層的父視窗是面板不是樹，
+        // 交給預設處理會一路往上傳、樹收不到，所以直接轉給樹（滾輪訊息的座標是螢幕座標，不用換）
+        if (m_wnd_tv)
+            return SendMessage(m_wnd_tv, msg, wp, lp);
+        return 0;
     case WM_LBUTTONUP:
         end_thin_scrollbar_drag(axis, true);
         end_thin_track_hold(axis);
