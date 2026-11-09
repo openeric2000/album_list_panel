@@ -223,6 +223,10 @@ private:
     };
 
     static inline bool s_thin_scrollbar_enabled{true};
+    // 細捲軸平常隱藏（滑鼠移進軌道才出現），直、橫各一個開關（2026-11-09）；跟細捲軸開關一樣存在 fb2k 共用設定，
+    // Columns UI 設定頁改了當場切換
+    static inline bool s_thin_autohide_vertical{true};
+    static inline bool s_thin_autohide_horizontal{true};
     static void s_sync_thin_scrollbar_setting();
 
     bool m_thin_active{};

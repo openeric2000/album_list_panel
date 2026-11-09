@@ -14,6 +14,10 @@ namespace {
 
 constexpr char thin_scrollbar_config_key[] = "nocturne.thinScrollbar";
 constexpr bool thin_scrollbar_default = true;
+// 平常隱藏的開關（Columns UI 的 thin_scrollbar.h 有同樣的鍵名，兩邊要一致）；預設兩條都隱藏
+constexpr char thin_autohide_vertical_key[] = "nocturne.thinScrollbar.autoHideVertical";
+constexpr char thin_autohide_horizontal_key[] = "nocturne.thinScrollbar.autoHideHorizontal";
+constexpr bool thin_autohide_default = true;
 
 // 單位是 96 DPI 的像素，執行時依系統縮放換算
 constexpr int thin_strip_width = 16;
@@ -22,9 +26,10 @@ constexpr int thin_thumb_rest_width = 4;
 constexpr int thin_thumb_near_width = 10;
 constexpr int thin_thumb_min_height = 36;
 
-// 不透明度（0～255）：平常完全看不見、靠近 .42、滑到滑塊上或拖曳中 .62
-// 平常原本是 .24；2026-11-09 使用者先要水平那條（會擋到最下面一列的資料夾名稱）改成滑鼠移進軌道才出現，看過後垂直也一起改
-constexpr BYTE thin_alpha_rest = 0;
+// 不透明度（0～255）：平常 .24（設成「平常隱藏」的那條是 0）、靠近 .42、滑到滑塊上或拖曳中 .62
+// 2026-11-09 使用者先要水平那條（會擋到最下面一列的資料夾名稱）改成滑鼠移進軌道才出現，看過後垂直也一起改，再要求設定頁直、橫各一個開關
+constexpr BYTE thin_alpha_rest = 61;
+constexpr BYTE thin_alpha_hidden = 0;
 constexpr BYTE thin_alpha_near = 107;
 constexpr BYTE thin_alpha_hot = 158;
 
@@ -161,9 +166,26 @@ void AlbumListWindow::s_sync_thin_scrollbar_setting()
                     s_instances[i]->apply_thin_scrollbar();
             });
         });
+
+        // 平常隱藏的兩個開關：改了只要重畫浮層（不透明度不同，update_thin_overlay 會判斷出有變）
+        for (const char* key : std::initializer_list<const char*>{thin_autohide_vertical_key, thin_autohide_horizontal_key}) {
+            fb2k::configStore::get()->addPermanentNotify(key, [] {
+                fb2k::inMainThread([] {
+                    const auto store = fb2k::configStore::get();
+                    s_thin_autohide_vertical = store->getConfigBool(thin_autohide_vertical_key, thin_autohide_default);
+                    s_thin_autohide_horizontal = store->getConfigBool(thin_autohide_horizontal_key, thin_autohide_default);
+
+                    for (size_t i{}; i < s_instances.get_count(); ++i)
+                        s_instances[i]->update_thin_overlay();
+                });
+            });
+        }
     }
 
     s_thin_scrollbar_enabled = read_setting();
+    s_thin_autohide_vertical = fb2k::configStore::get()->getConfigBool(thin_autohide_vertical_key, thin_autohide_default);
+    s_thin_autohide_horizontal
+        = fb2k::configStore::get()->getConfigBool(thin_autohide_horizontal_key, thin_autohide_default);
 }
 
 void AlbumListWindow::apply_thin_scrollbar()
@@ -425,6 +447,7 @@ void AlbumListWindow::update_thin_overlay(ThinAxis axis)
     const auto colour = m_item_colours->get_colour(cui::colours::colour_text);
     const BYTE alpha = axis_state.dragging || axis_state.thumb_hot ? thin_alpha_hot
         : axis_state.pointer_near                                          ? thin_alpha_near
+        : (axis == ThinAxis::vertical ? s_thin_autohide_vertical : s_thin_autohide_horizontal) ? thin_alpha_hidden
                                                                    : thin_alpha_rest;
 
     ThinOverlayState state{geometry->strip, geometry->thumb, colour, alpha};
