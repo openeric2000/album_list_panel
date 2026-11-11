@@ -34,31 +34,57 @@ private:
     const char* m_view;
 };
 
-// 檔名或歌名含這些字（不分大小寫）就當成伴奏版。「inst」只認有括號或句點的寫法，免得把 Instinct 之類的歌名也藏掉
-constexpr std::wstring_view instrumental_keywords[] = {L"instrumental", L"inst.", L"(inst", L"[inst", L"inst)", L"inst]",
-    L"off vocal", L"off-vocal", L"offvocal", L"karaoke", L"カラオケ" /* カラオケ */, L"backing track",
-    L"without vocal", L"伴奏" /* 伴奏 */};
+std::wstring to_lower_wide(const char* utf8)
+{
+    std::wstring text(pfc::stringcvt::string_wide_from_utf8(utf8 ? utf8 : "").get_ptr());
+    if (!text.empty())
+        CharLowerBuffW(text.data(), static_cast<DWORD>(text.size()));
+    return text;
+}
 
-bool contains_instrumental_keyword(const char* utf8)
+// 設定裡的關鍵字：分號分隔、去掉前後空白、轉小寫（空的略過）
+std::vector<std::wstring> read_instrumental_keywords()
+{
+    const auto store = fb2k::configStore::get();
+    const auto custom = store->getConfigBool(hide_instrumental_custom_config_key, hide_instrumental_custom_default);
+    const auto all = custom
+        ? to_lower_wide(
+              store->getConfigString(hide_instrumental_keywords_config_key, hide_instrumental_keywords_default)->c_str())
+        : to_lower_wide(hide_instrumental_keywords_default);
+    std::vector<std::wstring> keywords;
+    size_t start{};
+    while (start <= all.size()) {
+        auto end = all.find(L';', start);
+        if (end == std::wstring::npos)
+            end = all.size();
+        auto keyword = all.substr(start, end - start);
+        const auto first = keyword.find_first_not_of(L" \t");
+        const auto last = keyword.find_last_not_of(L" \t");
+        if (first != std::wstring::npos)
+            keywords.push_back(keyword.substr(first, last - first + 1));
+        start = end + 1;
+    }
+    return keywords;
+}
+
+bool contains_any(const char* utf8, const std::vector<std::wstring>& keywords)
 {
     if (!utf8 || !*utf8)
         return false;
-    std::wstring text(pfc::stringcvt::string_wide_from_utf8(utf8).get_ptr());
-    if (text.empty())
-        return false;
-    CharLowerBuffW(text.data(), static_cast<DWORD>(text.size()));
+    const auto text = to_lower_wide(utf8);
     return std::ranges::any_of(
-        instrumental_keywords, [&text](std::wstring_view keyword) { return text.find(keyword) != std::wstring::npos; });
+        keywords, [&text](const std::wstring& keyword) { return text.find(keyword) != std::wstring::npos; });
 }
 
-bool is_instrumental(const metadb_handle_ptr& track)
+// 檔名或歌名含任一個關鍵字就當成伴奏版
+bool is_instrumental(const metadb_handle_ptr& track, const std::vector<std::wstring>& keywords)
 {
-    if (contains_instrumental_keyword(pfc::string_filename(track->get_path()).c_str()))
+    if (contains_any(pfc::string_filename(track->get_path()).c_str(), keywords))
         return true;
 
     metadb_info_container::ptr info;
     if (track->get_info_ref(info))
-        return contains_instrumental_keyword(info->info().meta_get("title", 0));
+        return contains_any(info->info().meta_get("title", 0), keywords);
     return false;
 }
 
@@ -129,12 +155,15 @@ void send_nodes_to_autosend_playlist(const std::vector<node_ptr>& nodes, const c
 
     metadb_handle_list tracks = node_tracks.tracks();
     if (is_hide_instrumental_enabled()) {
-        metadb_handle_list kept;
-        for (size_t i{}; i < tracks.get_count(); ++i) {
-            if (!is_instrumental(tracks[i]))
-                kept.add_item(tracks[i]);
+        const auto keywords = read_instrumental_keywords();
+        if (!keywords.empty()) {
+            metadb_handle_list kept;
+            for (size_t i{}; i < tracks.get_count(); ++i) {
+                if (!is_instrumental(tracks[i], keywords))
+                    kept.add_item(tracks[i]);
+            }
+            tracks = std::move(kept);
         }
-        tracks = std::move(kept);
     }
 
     const auto api = playlist_manager::get();

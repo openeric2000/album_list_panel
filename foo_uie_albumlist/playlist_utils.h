@@ -7,6 +7,15 @@ namespace alp {
 // 只影響自動送出的清單，右鍵「送到播放清單」等其他送法不變
 inline constexpr char hide_instrumental_config_key[] = "nocturne.folderTree.hideInstrumental";
 inline constexpr bool hide_instrumental_default = false;
+// 關鍵字（設定頁可改，用分號分隔、不分大小寫，比對檔名與歌名）；預設值要跟 Columns UI 的 tab_next_track_toast.cpp 一致。
+// 「inst」只放有括號或句點的寫法，免得把 Instinct 之類的歌名也藏掉
+inline constexpr char hide_instrumental_keywords_config_key[] = "nocturne.folderTree.hideInstrumental.keywords";
+inline constexpr char hide_instrumental_keywords_default[]
+    = "instrumental;inst.;(inst;[inst;inst);inst];off vocal;off-vocal;offvocal;karaoke;\xE3\x82\xAB\xE3\x83\xA9\xE3\x82"
+      "\xAA\xE3\x82\xB1;backing track;without vocal;\xE4\xBC\xB4\xE5\xA5\x8F"; // …;カラオケ;…;伴奏
+// 「自訂關鍵字」開關：關著（預設）一律用上面的預設值，開著才用設定頁輸入的關鍵字
+inline constexpr char hide_instrumental_custom_config_key[] = "nocturne.folderTree.hideInstrumental.customKeywords";
+inline constexpr bool hide_instrumental_custom_default = false;
 bool is_hide_instrumental_enabled();
 
 void send_tracks_to_playlist(const metadb_handle_list& tracks, bool replace_contents);

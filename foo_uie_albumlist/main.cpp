@@ -595,11 +595,11 @@ void AlbumListWindow::s_sync_filter_position_setting()
             });
         });
 
-        // 隱藏伴奏版的開關改了：用目前選的資料夾重送一次「目前選取資料夾」（不切換使用者正在看的分頁）。
-        // 有好幾個面板時只送第一個有選取的，免得互相蓋掉（2026-11-11）
-        fb2k::configStore::get()->addPermanentNotify(alp::hide_instrumental_config_key, [] {
-            fb2k::inMainThread([] {
-                if (!cfg_autosend)
+        // 隱藏伴奏版的開關或關鍵字改了：用目前選的資料夾重送一次「目前選取資料夾」（不切換使用者正在看的分頁）。
+        // 有好幾個面板時只送第一個有選取的，免得互相蓋掉；關鍵字改了但開關關著就不用送（2026-11-11）
+        const auto resend = [](bool only_when_enabled) {
+            fb2k::inMainThread([only_when_enabled] {
+                if (!cfg_autosend || (only_when_enabled && !alp::is_hide_instrumental_enabled()))
                     return;
                 for (size_t i{}; i < s_instances.get_count(); ++i) {
                     const auto instance = s_instances[i];
@@ -612,7 +612,12 @@ void AlbumListWindow::s_sync_filter_position_setting()
                     break;
                 }
             });
-        });
+        };
+        fb2k::configStore::get()->addPermanentNotify(alp::hide_instrumental_config_key, [resend] { resend(false); });
+        fb2k::configStore::get()->addPermanentNotify(
+            alp::hide_instrumental_keywords_config_key, [resend] { resend(true); });
+        fb2k::configStore::get()->addPermanentNotify(
+            alp::hide_instrumental_custom_config_key, [resend] { resend(true); });
     }
 
     s_filter_on_top = fb2k::configStore::get()->getConfigBool(filter_on_top_config_key, filter_on_top_default);
