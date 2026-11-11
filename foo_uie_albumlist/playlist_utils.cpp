@@ -34,7 +34,40 @@ private:
     const char* m_view;
 };
 
+// 檔名或歌名含這些字（不分大小寫）就當成伴奏版。「inst」只認有括號或句點的寫法，免得把 Instinct 之類的歌名也藏掉
+constexpr std::wstring_view instrumental_keywords[] = {L"instrumental", L"inst.", L"(inst", L"[inst", L"inst)", L"inst]",
+    L"off vocal", L"off-vocal", L"offvocal", L"karaoke", L"カラオケ" /* カラオケ */, L"backing track",
+    L"without vocal", L"伴奏" /* 伴奏 */};
+
+bool contains_instrumental_keyword(const char* utf8)
+{
+    if (!utf8 || !*utf8)
+        return false;
+    std::wstring text(pfc::stringcvt::string_wide_from_utf8(utf8).get_ptr());
+    if (text.empty())
+        return false;
+    CharLowerBuffW(text.data(), static_cast<DWORD>(text.size()));
+    return std::ranges::any_of(
+        instrumental_keywords, [&text](std::wstring_view keyword) { return text.find(keyword) != std::wstring::npos; });
+}
+
+bool is_instrumental(const metadb_handle_ptr& track)
+{
+    if (contains_instrumental_keyword(pfc::string_filename(track->get_path()).c_str()))
+        return true;
+
+    metadb_info_container::ptr info;
+    if (track->get_info_ref(info))
+        return contains_instrumental_keyword(info->info().meta_get("title", 0));
+    return false;
+}
+
 } // namespace
+
+bool is_hide_instrumental_enabled()
+{
+    return fb2k::configStore::get()->getConfigBool(hide_instrumental_config_key, hide_instrumental_default);
+}
 
 void send_tracks_to_playlist(const metadb_handle_list& tracks, bool replace_contents)
 {
@@ -87,12 +120,22 @@ void send_nodes_to_playlist(const std::vector<node_ptr>& nodes, bool replace_con
     }
 }
 
-void send_nodes_to_autosend_playlist(const std::vector<node_ptr>& nodes, const char* view, bool b_play)
+void send_nodes_to_autosend_playlist(const std::vector<node_ptr>& nodes, const char* view, bool b_play, bool activate)
 {
-    const auto tracks = get_node_tracks(nodes);
+    const auto node_tracks = get_node_tracks(nodes);
 
-    if (tracks.tracks().size() == 0)
+    if (node_tracks.tracks().size() == 0)
         return;
+
+    metadb_handle_list tracks = node_tracks.tracks();
+    if (is_hide_instrumental_enabled()) {
+        metadb_handle_list kept;
+        for (size_t i{}; i < tracks.get_count(); ++i) {
+            if (!is_instrumental(tracks[i]))
+                kept.add_item(tracks[i]);
+        }
+        tracks = std::move(kept);
+    }
 
     const auto api = playlist_manager::get();
     pfc::string8 playlist_name;
@@ -103,9 +146,10 @@ void send_nodes_to_autosend_playlist(const std::vector<node_ptr>& nodes, const c
 
     api->playlist_undo_backup(index);
     api->playlist_clear(index);
-    api->playlist_add_items(index, tracks.tracks(), bit_array_val(cfg_add_items_select != 0));
+    api->playlist_add_items(index, tracks, bit_array_val(cfg_add_items_select != 0));
 
-    api->set_active_playlist(index);
+    if (activate)
+        api->set_active_playlist(index);
 
     if (b_play && cfg_play_on_send) {
         api->reset_playing_playlist();
