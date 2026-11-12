@@ -6,7 +6,8 @@ namespace alp {
 // 開著時送進自動送出播放清單（「目前選取資料夾」）的歌會略過檔名或歌名含 Instrumental、Off Vocal、カラオケ 等字的版本；
 // 只影響自動送出的清單，右鍵「送到播放清單」等其他送法不變
 inline constexpr char hide_instrumental_config_key[] = "nocturne.folderTree.hideInstrumental";
-inline constexpr bool hide_instrumental_default = false;
+// 預設開（2026-11-12 使用者決定，朋友版也一樣）：沒存過這個設定的環境一律隱藏；已手動切過的照存的值
+inline constexpr bool hide_instrumental_default = true;
 // 關鍵字（設定頁可改，用分號分隔、不分大小寫，比對檔名與歌名）；預設值要跟 Columns UI 的 tab_next_track_toast.cpp 一致。
 // 「inst」只放有括號或句點的寫法，免得把 Instinct 之類的歌名也藏掉
 inline constexpr char hide_instrumental_keywords_config_key[] = "nocturne.folderTree.hideInstrumental.keywords";
